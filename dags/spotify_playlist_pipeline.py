@@ -1,0 +1,31 @@
+from airflow import DAG
+from airflow.operators.bash import BashOperator
+from datetime import datetime
+
+AIRFLOW_HOME = "/D/tdo18/airflow" 
+PROJECT_DIR = f"{AIRFLOW_HOME}/spotify_pipeline"
+
+with DAG(
+    dag_id="spotify_playlist_pipeline",
+    start_date=datetime(2024, 2, 1),
+    schedule=None,
+    catchup=False,
+    tags=["csds417", "spotify", "reccobeats", "data-engineering"],
+) as dag:
+
+    extract_and_store_top_tracks = BashOperator(
+        task_id="extract_and_store_top_tracks",
+        bash_command=f"cd {PROJECT_DIR} && python scripts/ingest_spotify_top_tracks.py",
+    )
+
+    enrich_audio_features = BashOperator(
+        task_id="enrich_audio_features",
+        bash_command=f"cd {PROJECT_DIR} && python scripts/enrich_audio_features_from_reccobeats.py",
+    )
+
+    upload_missing_report = BashOperator(
+        task_id="upload_missing_audio_features_report",
+        bash_command=f"cd {PROJECT_DIR} && python scripts/upload_missing_audio_features_report.py",
+    )
+
+    extract_and_store_top_tracks >> enrich_audio_features >> upload_missing_report

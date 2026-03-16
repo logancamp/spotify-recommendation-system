@@ -1,0 +1,2 @@
+weather_cluster,acousticness,danceability,energy,instrumentalness,liveness,loudness,speechiness,tempo,valence,dominant_weather_label,temperature_c,relative_humidity,wind_speed_m_s,dewpoint_c,visibility_m
+0,0.34191052631578944,0.6241578947368421,0.5872368421052632,0.02765569447368421,0.2557842105263158,-8.126421052631578,0.1809157894736842,108.5248947368421,0.5939736842105262,cloudy,2.0,43.971749191094,12.96,-9.0,16093.439999999999

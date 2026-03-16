@@ -1,0 +1,2 @@
+station_id,observation_time,temperature_c,relative_humidity,wind_speed_m_s,dewpoint_c,visibility_m,text_description,latitude,longitude
+KCLE,2026-03-16T16:20:00+00:00,3,69.687768711566,,-2,16093.44,Cloudy,41.4866,-81.8037

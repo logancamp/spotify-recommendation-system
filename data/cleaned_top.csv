@@ -1,0 +1,46 @@
+track_id,track_name,artist_names,isrc,duration_ms,explicit,features_found,match_source,acousticness,danceability,energy,instrumentalness,key,liveness,loudness,mode,speechiness,tempo,valence
+2SWqVCbl51UX5xgDHvE1uT,7 Hours,Dominic Fike,USQX92301813,168094,True,1,spotify_id,0.625,0.67,0.409,0.0,0.0,0.211,-10.406,1.0,0.106,80.468,0.595
+1dlOr60VqwO8DIGn9TLeeu,Regressa,Kaz Moon,GX3Q92378968,99217,False,1,spotify_id,0.742,0.636,0.408,0.0523,1.0,0.108,-11.448,1.0,0.298,88.535,0.799
+3my33XXLpYUzVEeLOyftV2,Frisky,Dominic Fike,USQX92301819,115618,False,1,spotify_id,0.206,0.858,0.48,0.0,9.0,0.0733,-5.502,1.0,0.0498,97.009,0.813
+3SAga35lAPYdjj3qyfEsCF,Feel It (From “Invincible”),d4vd,USUM72401132,157974,False,1,spotify_id,0.0288,0.565,0.593,0.0,8.0,0.215,-5.864,1.0,0.0883,120.509,0.429
+2P6YMsU9jt22CXfizfudi3,Love Hangover (feat. Dominic Fike),"JENNIE, Dominic Fike",USQX92500253,180129,True,1,spotify_id,0.164,0.648,0.78,0.0,0.0,0.0971,-6.977,0.0,0.194,147.956,0.668
+70kdJnm1X6eEM8DbWa8Mnc,YOU'RE THE ONE,"KAYTRANADA, Syd",GBBKS1600023,227706,False,1,spotify_id,0.0323,0.824,0.396,0.00286,2.0,0.108,-9.663,1.0,0.332,118.048,0.253
+0o96RPgCulsYKqZK3u14nM,cola head,Willow Kayne,QZK6Q2377800,143157,False,1,spotify_id,0.0498,0.765,0.648,0.0,0.0,0.085,-6.96,1.0,0.0721,114.013,0.671
+3gJDgenxLephg09x86IxPs,TEMPTATION,Joey Bada$$,QMKSC1700042,244197,True,1,spotify_id,0.397,0.775,0.707,0.0,10.0,0.874,-5.339,0.0,0.152,104.979,0.78
+3dAk7Z16rv38qRM3MIhCIX,Comfort Me,Malcolm Todd,USSM12408089,171111,True,1,spotify_id,0.289,0.858,0.577,0.0108,1.0,0.268,-6.209,0.0,0.0344,108.017,0.81
+5kukZPbylK4zbZ5xrL1mfV,LETTERMAN,"Tommy Richman, Paco",USC4R2446573,160000,True,1,spotify_id,0.624,0.74,0.398,0.0,7.0,0.134,-6.714,0.0,0.302,179.931,0.853
+08vlprFBmwh9TQnjXUtZDG,FAMJAM4000,Jordan Ward,USUM72300085,158133,False,1,spotify_id,0.434,0.871,0.57,0.452,6.0,0.145,-7.421,0.0,0.0676,116.563,0.711
+6w7eHZFNdOpg2teEBCqjy2,on & on - Sammy Virji Remix,"piri & tommy, Sammy Virji, Tommy Villiers",GBUM72206333,131958,False,1,spotify_id,0.165,0.833,0.765,0.00723,11.0,0.0957,-3.792,0.0,0.051,127.947,0.797
+4AZk9awBXJRVaLS7gOsaMO,Talk Down,Dijon,USWB12104065,151565,False,1,spotify_id,0.182,0.752,0.823,0.0,1.0,0.213,-6.267,1.0,0.139,112.888,0.709
+5LyKocU0lhUBlXrFKDxbBO,Snap My Finger (feat. PinkPantheress),"KAYTRANADA, PinkPantheress",USRC12401536,201371,True,1,spotify_id,0.016,0.772,0.639,0.00975,5.0,0.431,-7.876,0.0,0.0455,117.99,0.497
+2FeaWWfbpM70QgZQnScloz,Availability,Ethel,QZR8K2441205,172000,False,1,spotify_id,0.0912,0.927,0.412,2.77e-05,7.0,0.0969,-7.596,1.0,0.0413,105.988,0.709
+2FdDv1zi70hiOBOAsQeaXf,Robot Lovers,Willow Kayne,QM6MZ2407912,154406,False,1,spotify_id,0.132,0.672,0.645,4.69e-05,0.0,0.103,-7.127,1.0,0.0415,103.904,0.387
+71DSaeKtXQaMAqnvMT7Uoc,Mona Lisa,Dominic Fike,USQX92303644,186066,False,1,spotify_id,0.231,0.759,0.646,0.0,1.0,0.161,-7.603,1.0,0.12,111.043,0.445
+6jlG8gBPNAgBgoivw2Ig09,DEVIL IS A LIE,Tommy Richman,USC4R2445163,130944,True,1,spotify_id,0.174,0.904,0.452,0.0,9.0,0.115,-7.272,1.0,0.132,90.026,0.613
+0EWG5cpMUT0Jp0Pye9S0Ne,24 (Turn It Up) (+6),"ANOTR, Kurtis Wells",USA2P2463486,180000,False,1,spotify_id,0.286,0.762,0.789,0.689,1.0,0.418,-6.261,0.0,0.0288,128.004,0.78
+5uRTAG2Fs6rQt41HwaIx53,Dadvocate,Childish Gambino,USRC12402305,160988,False,1,spotify_id,0.107,0.836,0.553,9.22e-06,0.0,0.105,-10.71,1.0,0.0383,85.01,0.833
+2Nq4SFbvYYZa8AF7lD7CWU,Sexy to Someone,Clairo,USA2P2416224,207795,False,1,spotify_id,0.338,0.716,0.545,0.00344,0.0,0.101,-6.949,0.0,0.0329,98.232,0.82
+17kygxrx5eoU1EsHSr1dos,Los Santos,Current Blue,QZHNB2099083,137647,True,1,spotify_id,0.456,0.796,0.463,0.0,4.0,0.354,-7.344,0.0,0.0459,84.974,0.693
+7yNf9YjeO5JXUE3JEBgnYc,Babydoll,Dominic Fike,USQX91802457,97960,False,1,spotify_id,0.114,0.762,0.604,0.0,7.0,0.0271,-5.296,0.0,0.11,168.007,0.847
+3awYmrxWHNBpmJ81YxSCAn,Colorado Kyle (Live),Arcy Drive,QZPLS2281018,213750,False,1,spotify_id,0.0139,0.325,0.84,1.16e-05,9.0,0.113,-6.003,1.0,0.0406,109.023,0.448
+2k9cIkCVD4zotzFL6xj6hg,"Player Two - From ""Don't Tell Mom The Babysitter's Dead""",Jordan Ward,USUM72400814,158057,False,1,spotify_id,0.332,0.907,0.654,0.000297,5.0,0.0285,-4.259,0.0,0.0472,131.061,0.968
+1Ad2HcIX9zBqoWRvxtpYGf,Candle Flame,"Jungle, Erick the Architect",QM4TX2306635,174020,False,1,spotify_id,0.143,0.673,0.72,1.82e-05,9.0,0.913,-7.318,0.0,0.039,123.032,0.588
+24VNenhLzKDWDlQ5Qaznav,Dreamin,ZAYN,USUG12401414,212213,False,1,spotify_id,0.43,0.461,0.473,0.0,4.0,0.363,-6.731,1.0,0.0504,176.05,0.423
+0zikWa6k06uycAkRB8CsXA,hi grace,Dominic Fike,USQX92401822,161608,False,1,spotify_id,0.232,0.712,0.664,0.0261,11.0,0.196,-6.459,1.0,0.231,98.011,0.699
+13HalBseZHAT19C6jWs1Ma,Probably Up,Lawrence,QM24S1832373,254653,False,1,spotify_id,0.338,0.735,0.609,3.11e-05,10.0,0.381,-5.574,1.0,0.0557,95.489,0.704
+4Q9ExJGFgL9Jd9kmYH3nXs,Miss possessive,Tate McRae,USRC12403576,139098,True,1,spotify_id,0.259,0.782,0.747,1.85e-05,8.0,0.1,-4.656,1.0,0.0361,101.992,0.325
+71p2ub5QJhJTzfvXbXaUXd,High No More,Hajaj,USUYG1389847,198845,False,1,spotify_id,0.0117,0.885,0.272,0.158,10.0,0.114,-11.362,0.0,0.0628,112.026,0.806
+46Y9vXsmtnYZdEwny4o1Dd,Medallion,Jenevieve,GBKPL2082444,147133,True,1,spotify_id,0.164,0.772,0.474,6.53e-06,10.0,0.374,-6.791,0.0,0.0466,78.961,0.81
+36GforftaCASOR8kBnhqN8,I Wasn’t There,"Kevin Abstract, DERBY",USA2P2527026,127888,False,1,spotify_id,0.207,0.619,0.532,0.0,1.0,0.438,-7.336,0.0,0.0479,159.821,0.357
+0je57Uq5eTk1wrPzn9sWbl,When Did You Get Hot?,Sabrina Carpenter,USUM72504446,145398,False,1,spotify_id,0.231,0.696,0.665,0.0,5.0,0.33,-4.559,1.0,0.13,89.136,0.573
+1Nk1kQx3HmUaobcAu9S26f,ACTIN UP,Tommy Richman,USC4R2553047,133768,True,1,spotify_id,0.0161,0.927,0.536,0.0,1.0,0.0947,-5.245,0.0,0.0741,144.978,0.449
+6WTFHKrnZpwEBLRS10Ylqs,misses,Dominic Fike,USQX92401826,74378,False,1,spotify_id,0.13,0.578,0.509,0.734,2.0,0.344,-6.229,1.0,0.0279,119.945,0.586
+3orJAvBLWveT5ruftD5KoP,More to Love,Elle Eliades,QZTB42220489,184125,False,1,spotify_id,0.428,0.451,0.299,0.000163,7.0,0.121,-11.306,1.0,0.156,79.263,0.394
+2uvE4L5ZsYKpv8hbK4TIOt,MUTT,Leon Thomas,USUM72409025,192933,True,1,spotify_id,0.216,0.572,0.455,3.88e-06,1.0,0.072,-8.078,1.0,0.134,179.787,0.597
+2nFDM7uMOdPGPz37FluIob,Superficial,Lawrence,US7VG1610103,248026,True,1,spotify_id,0.567,0.674,0.502,0.0,1.0,0.11,-7.603,0.0,0.24,100.212,0.286
+5lSszsPqufMetObXX3zCQU,In a Trance,Malcolm Todd,USSM12306218,83368,False,1,spotify_id,0.0961,0.878,0.636,0.265,8.0,0.0997,-4.526,0.0,0.0708,94.997,0.878
+45J4avUb9Ni0bnETYaYFVJ,luther (with sza),"Kendrick Lamar, SZA",USUG12408496,177598,False,1,spotify_id,0.251,0.707,0.575,0.0,2.0,0.248,-7.546,1.0,0.125,138.008,0.576
+0w5Bdu51Ka25Pf3hojsKHh,Hard Times,Paramore,USAT21700948,182693,False,1,spotify_id,0.00647,0.695,0.818,4.87e-06,5.0,0.0219,-5.379,0.0,0.0334,119.965,0.916
+5SkRLpaGtvYPhw02vZhQQ9,All Falls Down,"Kanye West, Syleena Johnson",USDJ20301703,223506,True,1,spotify_id,0.149,0.657,0.734,0.0,8.0,0.139,-4.832,0.0,0.484,91.03,0.434
+3ZOEytgrvLwQaqXreDs2Jx,Can't Stop,Red Hot Chili Peppers,USWB10201694,269000,False,1,spotify_id,0.0179,0.618,0.938,0.0,9.0,0.167,-3.442,1.0,0.0456,91.455,0.875
+3qdskG3Sc6E2OddOfyBUpt,Spooky - Quinten 909 Radio Mix,"Dusty Springfield, Quinten 909",NLTH11400064,162000,False,1,spotify_id,0.0204,0.808,0.793,0.00023,4.0,0.0751,-8.1,0.0,0.0484,122.992,0.88

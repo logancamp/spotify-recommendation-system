@@ -32,9 +32,14 @@ CREATE TABLE IF NOT EXISTS user_top_tracks (
 
 CREATE TABLE IF NOT EXISTS catalog_tracks (
   catalog_id SERIAL PRIMARY KEY,
+  user_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE,
   spotify_track_id TEXT REFERENCES tracks(spotify_track_id) ON DELETE SET NULL,
-  source TEXT,                 -- from the documentations:  'spotify_search', 'curated_list'
-  query_used TEXT,             -- from the documentation: the search query/label used to collect it
+
+  source TEXT,         -- e.g. 'spotify_search', 'curated_playlist', 'top_artist_seed', 'genre_seed'
+  query_used TEXT,     -- the exact query used, if applicable
+  seed_type TEXT,      -- e.g. 'artist', 'genre', 'track', 'playlist'
+  seed_value TEXT,     -- e.g. 'Drake', 'gospel', 'Elevation Worship'
+
   pulled_at TIMESTAMPTZ DEFAULT NOW(),
   raw_json JSONB
 );

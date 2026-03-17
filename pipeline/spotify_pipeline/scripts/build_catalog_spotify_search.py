@@ -1,0 +1,190 @@
+import os
+import json
+import base64
+import requests
+from dotenv import load_dotenv
+from sqlalchemy import create_engine, text
+
+load_dotenv()
+
+# ---------- Spotify ----------
+CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
+CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
+
+# ---------- DB ----------
+DB_HOST = os.getenv("DB_HOST")
+DB_PORT = os.getenv("DB_PORT")
+DB_NAME = os.getenv("DB_NAME")
+DB_USER = os.getenv("DB_USER")
+DB_PASSWORD = os.getenv("DB_PASSWORD")
+
+if not all([CLIENT_ID, CLIENT_SECRET, DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD]):
+    raise SystemExit("Missing Spotify or DB values in .env")
+
+db_url = f"postgresql+psycopg2://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+engine = create_engine(db_url, pool_pre_ping=True)
+
+# For now this is still a prototype search seed list.
+# Later we will replace this with user-derived seeds from top artists / genres.
+SEARCH_SEEDS = [
+    {"seed_type": "genre", "seed_value": "gospel", "query_used": "gospel worship"},
+    {"seed_type": "genre", "seed_value": "christian rap", "query_used": "christian rap"},
+    {"seed_type": "genre", "seed_value": "praise", "query_used": "praise live"},
+    {"seed_type": "genre", "seed_value": "worship", "query_used": "worship 2024"},
+]
+
+def get_access_token():
+    token_url = "https://accounts.spotify.com/api/token"
+    auth_header = base64.b64encode(f"{CLIENT_ID}:{CLIENT_SECRET}".encode()).decode()
+
+    resp = requests.post(
+        token_url,
+        headers={
+            "Authorization": f"Basic {auth_header}",
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+        data={"grant_type": "client_credentials"},
+        timeout=20,
+    )
+    resp.raise_for_status()
+    return resp.json()["access_token"]
+
+def spotify_search_tracks(access_token, query, limit=10):
+    url = "https://api.spotify.com/v1/search"
+    resp = requests.get(
+        url,
+        headers={"Authorization": f"Bearer {access_token}"},
+        params={
+            "q": query,
+            "type": "track",
+            "limit": limit,
+        },
+        timeout=20,
+    )
+
+    if resp.status_code != 200:
+        print("Search query failed:", query)
+        print("Status:", resp.status_code)
+        print("Body:", resp.text)
+        resp.raise_for_status()
+
+    return resp.json()
+
+def ensure_demo_user(conn, spotify_user_hash="tdo18_demo"):
+    """
+    For now we keep the same prototype user pattern you already used.
+    Later this should come from the real Spotify user identity.
+    """
+    conn.execute(
+        text("""
+            INSERT INTO users (spotify_user_hash)
+            VALUES (:h)
+            ON CONFLICT (spotify_user_hash) DO NOTHING
+        """),
+        {"h": spotify_user_hash}
+    )
+    user_id = conn.execute(
+        text("SELECT user_id FROM users WHERE spotify_user_hash = :h"),
+        {"h": spotify_user_hash}
+    ).scalar()
+    return user_id
+
+def upsert_track(conn, track):
+    track_id = track["id"]
+    name = track.get("name")
+    popularity = track.get("popularity")
+    duration_ms = track.get("duration_ms")
+    explicit = track.get("explicit")
+    spotify_url = track.get("external_urls", {}).get("spotify")
+    isrc = track.get("external_ids", {}).get("isrc")
+
+    primary_artist = None
+    if track.get("artists"):
+        primary_artist = track["artists"][0].get("name")
+
+    conn.execute(
+        text("""
+            INSERT INTO tracks (
+                spotify_track_id, name, primary_artist, popularity,
+                duration_ms, explicit, spotify_url, isrc, raw_json
+            )
+            VALUES (
+                :spotify_track_id, :name, :primary_artist, :popularity,
+                :duration_ms, :explicit, :spotify_url, :isrc, CAST(:raw_json AS jsonb)
+            )
+            ON CONFLICT (spotify_track_id)
+            DO UPDATE SET
+                name = COALESCE(EXCLUDED.name, tracks.name),
+                primary_artist = COALESCE(EXCLUDED.primary_artist, tracks.primary_artist),
+                popularity = COALESCE(EXCLUDED.popularity, tracks.popularity),
+                duration_ms = COALESCE(EXCLUDED.duration_ms, tracks.duration_ms),
+                explicit = COALESCE(EXCLUDED.explicit, tracks.explicit),
+                spotify_url = COALESCE(EXCLUDED.spotify_url, tracks.spotify_url),
+                isrc = COALESCE(EXCLUDED.isrc, tracks.isrc),
+                raw_json = EXCLUDED.raw_json
+        """),
+        {
+            "spotify_track_id": track_id,
+            "name": name,
+            "primary_artist": primary_artist,
+            "popularity": popularity,
+            "duration_ms": duration_ms,
+            "explicit": explicit,
+            "spotify_url": spotify_url,
+            "isrc": isrc,
+            "raw_json": json.dumps(track),
+        }
+    )
+
+def insert_catalog_track(conn, user_id, spotify_track_id, source, query_used, seed_type, seed_value, raw_json):
+    conn.execute(
+        text("""
+            INSERT INTO catalog_tracks (
+                user_id, spotify_track_id, source, query_used, seed_type, seed_value, pulled_at, raw_json
+            )
+            VALUES (
+                :user_id, :spotify_track_id, :source, :query_used, :seed_type, :seed_value, NOW(), CAST(:raw_json AS jsonb)
+            )
+        """),
+        {
+            "user_id": user_id,
+            "spotify_track_id": spotify_track_id,
+            "source": source,
+            "query_used": query_used,
+            "seed_type": seed_type,
+            "seed_value": seed_value,
+            "raw_json": json.dumps(raw_json),
+        }
+    )
+
+def main():
+    access_token = get_access_token()
+    total_inserted = 0
+
+    with engine.begin() as conn:
+        user_id = ensure_demo_user(conn, spotify_user_hash="tdo18_demo")
+
+        for seed in SEARCH_SEEDS:
+            query = seed["query_used"]
+            data = spotify_search_tracks(access_token, query, limit=10)
+            items = data.get("tracks", {}).get("items", [])
+            print(f"Query '{query}' returned {len(items)} tracks")
+
+            for track in items:
+                upsert_track(conn, track)
+                insert_catalog_track(
+                    conn,
+                    user_id=user_id,
+                    spotify_track_id=track["id"],
+                    source="spotify_search",
+                    query_used=seed["query_used"],
+                    seed_type=seed["seed_type"],
+                    seed_value=seed["seed_value"],
+                    raw_json=track
+                )
+                total_inserted += 1
+
+    print(f"✅ Done. Inserted {total_inserted} catalog_tracks rows.")
+
+if __name__ == "__main__":
+    main()

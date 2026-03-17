@@ -35,4 +35,14 @@ with DAG(
         bash_command=f"cd {ANALYTICS_DIR} && python cluster.py",
     )
 
-    extract_and_store_top_tracks >> enrich_audio_features >> upload_missing_report >> run_audio_clustering
+    build_candidate_pool = BashOperator(
+        task_id="build_candidate_pool",
+        bash_command=f"cd {PIPELINE_DIR} && python scripts/build_catalog_spotify_search.py",
+    )
+
+    enrich_candidate_audio_features = BashOperator(
+        task_id="enrich_candidate_audio_features",
+        bash_command=f"cd {PIPELINE_DIR} && python scripts/enrich_catalog_audio_features.py",
+    )
+
+    extract_and_store_top_tracks >> enrich_audio_features >> upload_missing_report >> build_candidate_pool >> enrich_candidate_audio_features >> run_audio_clustering

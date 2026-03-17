@@ -45,4 +45,14 @@ with DAG(
         bash_command=f"cd {PIPELINE_DIR} && python scripts/enrich_catalog_audio_features.py",
     )
 
-    extract_and_store_top_tracks >> enrich_audio_features >> upload_missing_report >> build_candidate_pool >> enrich_candidate_audio_features >> run_audio_clustering
+    upload_candidate_search_raw_to_s3 = BashOperator(
+        task_id="upload_candidate_search_raw_to_s3",
+        bash_command=f"cd {PIPELINE_DIR} && python scripts/upload_candidate_search_raw_to_s3.py",
+    )
+
+    upload_ranked_recommendations_to_s3 = BashOperator(
+       task_id="upload_ranked_recommendations_to_s3",
+       bash_command=f"cd {ANALYTICS_DIR} && python upload_ranked_csv_to_s3.py",
+    )
+
+    extract_and_store_top_tracks >> enrich_audio_features >> upload_missing_report >> build_candidate_pool >> upload_candidate_search_raw_to_s3 >> enrich_candidate_audio_features >> run_audio_clustering >> upload_ranked_recommendations_to_s3

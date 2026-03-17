@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS user_top_tracks (
   rank INTEGER,
   time_range TEXT CHECK (time_range IN ('short_term','medium_term','long_term')),
   pulled_at TIMESTAMPTZ DEFAULT NOW(),
-  PRIMARY KEY (user_id, spotify_track_id, time_range, pulled_at)
+  PRIMARY KEY (user_id, spotify_track_id, time_range)
 );
 
 CREATE TABLE IF NOT EXISTS catalog_tracks (
@@ -35,13 +35,15 @@ CREATE TABLE IF NOT EXISTS catalog_tracks (
   user_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE,
   spotify_track_id TEXT REFERENCES tracks(spotify_track_id) ON DELETE SET NULL,
 
-  source TEXT,         -- e.g. 'spotify_search', 'curated_playlist', 'top_artist_seed', 'genre_seed'
-  query_used TEXT,     -- the exact query used, if applicable
-  seed_type TEXT,      -- e.g. 'artist', 'genre', 'track', 'playlist'
-  seed_value TEXT,     -- e.g. 'Drake', 'gospel', 'Elevation Worship'
+  source TEXT,
+  query_used TEXT,
+  seed_type TEXT,
+  seed_value TEXT,
 
   pulled_at TIMESTAMPTZ DEFAULT NOW(),
-  raw_json JSONB
+  raw_json JSONB,
+
+  UNIQUE (user_id, spotify_track_id, seed_type, seed_value)
 );
 
 -- Audio features keyed by Spotify track id (since /v1/audio-features accepts Spotify IDs)

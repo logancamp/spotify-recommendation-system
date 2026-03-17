@@ -235,19 +235,32 @@ def context_fit_score(row: pd.Series, context: dict) -> float:
 
 def rerank_with_context(assigned_df: pd.DataFrame, context: dict, alpha: float = 1.0, beta: float = 0.0) -> pd.DataFrame:
     """
-    FUTURE: Combine similarity score with context-based score.
+    Combine similarity score with optional context-based score.
 
     final_score = alpha * cluster_similarity + beta * context_fit_score
 
-    For now beta=0.0 so it's purely audio similarity.
+    Important:
+    - Sort highest score first
+    - Keep only the best-scoring row per spotify_track_id
     """
     df = assigned_df.copy()
+
     if "cluster_similarity" not in df.columns:
         raise ValueError("assigned_df must include 'cluster_similarity' column.")
+
+    if "spotify_track_id" not in df.columns:
+        raise ValueError("assigned_df must include 'spotify_track_id' column.")
+
     df["context_score"] = df.apply(lambda r: context_fit_score(r, context), axis=1)
     df["final_score"] = alpha * df["cluster_similarity"] + beta * df["context_score"]
-    return df.sort_values("final_score", ascending=False)
 
+    # Highest score first
+    df = df.sort_values("final_score", ascending=False).copy()
+
+    # Keep only the best row per unique track
+    df = df.drop_duplicates(subset=["spotify_track_id"], keep="first").copy()
+
+    return df
 
 # ============================================================
 # MAIN

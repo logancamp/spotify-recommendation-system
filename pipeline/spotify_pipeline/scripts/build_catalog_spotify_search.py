@@ -4,6 +4,8 @@ import base64
 import requests
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
+from pathlib import Path
+from datetime import datetime, timezone
 
 load_dotenv()
 
@@ -24,14 +26,6 @@ if not all([CLIENT_ID, CLIENT_SECRET, DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PAS
 db_url = f"postgresql+psycopg2://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 engine = create_engine(db_url, pool_pre_ping=True)
 
-# For now this is still a prototype search seed list.
-# Later we will replace this with user-derived seeds from top artists / genres.
-SEARCH_SEEDS = [
-    {"seed_type": "genre", "seed_value": "gospel", "query_used": "gospel worship"},
-    {"seed_type": "genre", "seed_value": "christian rap", "query_used": "christian rap"},
-    {"seed_type": "genre", "seed_value": "praise", "query_used": "praise live"},
-    {"seed_type": "genre", "seed_value": "worship", "query_used": "worship 2024"},
-]
 
 def get_access_token():
     token_url = "https://accounts.spotify.com/api/token"
@@ -136,15 +130,32 @@ def upsert_track(conn, track):
         }
     )
 
+
 def insert_catalog_track(conn, user_id, spotify_track_id, source, query_used, seed_type, seed_value, raw_json):
     conn.execute(
         text("""
             INSERT INTO catalog_tracks (
-                user_id, spotify_track_id, source, query_used, seed_type, seed_value, pulled_at, raw_json
+                user_id,
+                spotify_track_id,
+                source,
+                query_used,
+                seed_type,
+                seed_value,
+                pulled_at,
+                raw_json
             )
             VALUES (
-                :user_id, :spotify_track_id, :source, :query_used, :seed_type, :seed_value, NOW(), CAST(:raw_json AS jsonb)
+                :user_id,
+                :spotify_track_id,
+                :source,
+                :query_used,
+                :seed_type,
+                :seed_value,
+                NOW(),
+                CAST(:raw_json AS jsonb)
             )
+            ON CONFLICT (user_id, spotify_track_id, seed_type, seed_value)
+            DO NOTHING
         """),
         {
             "user_id": user_id,
@@ -157,6 +168,54 @@ def insert_catalog_track(conn, user_id, spotify_track_id, source, query_used, se
         }
     )
 
+
+def save_raw_search_result(query, data):
+    raw_dir = Path("data/raw_candidate_search")
+    raw_dir.mkdir(parents=True, exist_ok=True)
+
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    safe_query = query.lower().replace(" ", "_").replace("/", "_")
+    out_file = raw_dir / f"{ts}_{safe_query}.json"
+
+    with open(out_file, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+    print(f"Saved raw candidate search JSON: {out_file}")
+    return str(out_file)
+
+def derive_search_seeds_from_profile(conn, limit=10):
+    """
+    Build candidate-search seeds from the user's actual profile.
+    For now, use top artist names from long_term tracks.
+    """
+    rows = conn.execute(
+        text("""
+            SELECT
+                t.primary_artist,
+                COUNT(*) AS artist_count
+            FROM user_top_tracks u
+            JOIN tracks t
+              ON t.spotify_track_id = u.spotify_track_id
+            WHERE u.time_range = 'long_term'
+              AND t.primary_artist IS NOT NULL
+            GROUP BY t.primary_artist
+            ORDER BY artist_count DESC, t.primary_artist
+            LIMIT :limit
+        """),
+        {"limit": limit}
+    ).fetchall()
+
+    seeds = []
+    for r in rows:
+        artist = r[0]
+        seeds.append({
+            "seed_type": "artist",
+            "seed_value": artist,
+            "query_used": artist
+        })
+
+    return seeds
+
 def main():
     access_token = get_access_token()
     total_inserted = 0
@@ -164,11 +223,18 @@ def main():
     with engine.begin() as conn:
         user_id = ensure_demo_user(conn, spotify_user_hash="tdo18_demo")
 
-        for seed in SEARCH_SEEDS:
+        search_seeds = derive_search_seeds_from_profile(conn, limit=10)
+
+        print("Using profile-derived candidate seeds:")
+        for s in search_seeds:
+            print(s)
+
+        for seed in search_seeds:
             query = seed["query_used"]
             data = spotify_search_tracks(access_token, query, limit=10)
             items = data.get("tracks", {}).get("items", [])
             print(f"Query '{query}' returned {len(items)} tracks")
+            save_raw_search_result(query, data)
 
             for track in items:
                 upsert_track(conn, track)

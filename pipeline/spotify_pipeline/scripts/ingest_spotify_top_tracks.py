@@ -28,14 +28,19 @@ DB_NAME = os.getenv("DB_NAME")
 DB_USER = os.getenv("DB_USER")
 DB_PASSWORD = os.getenv("DB_PASSWORD")
 
-required = [CLIENT_ID, CLIENT_SECRET, REFRESH_TOKEN, AWS_ACCESS_KEY, AWS_SECRET_KEY, AWS_SESSION_TOKEN, AWS_REGION, S3_BUCKET,
-            DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD]
+required = [
+    CLIENT_ID, CLIENT_SECRET, REFRESH_TOKEN,
+    AWS_ACCESS_KEY, AWS_SECRET_KEY, AWS_SESSION_TOKEN, AWS_REGION, S3_BUCKET,
+    DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD
+]
 if not all(required):
     raise SystemExit("❌ Missing required env vars in .env (Spotify/AWS/DB).")
+
 
 def get_spotify_access_token() -> str:
     token_url = "https://accounts.spotify.com/api/token"
     auth_header = base64.b64encode(f"{CLIENT_ID}:{CLIENT_SECRET}".encode()).decode()
+
     resp = requests.post(
         token_url,
         headers={"Authorization": f"Basic {auth_header}"},
@@ -44,6 +49,7 @@ def get_spotify_access_token() -> str:
     )
     resp.raise_for_status()
     return resp.json()["access_token"]
+
 
 def spotify_get_top_tracks(access_token: str, time_range: str, limit: int = 50):
     url = "https://api.spotify.com/v1/me/top/tracks"
@@ -56,6 +62,7 @@ def spotify_get_top_tracks(access_token: str, time_range: str, limit: int = 50):
     resp.raise_for_status()
     return resp.json()
 
+
 def init_s3_client():
     session = boto3.Session(
         aws_access_key_id=AWS_ACCESS_KEY,
@@ -64,6 +71,7 @@ def init_s3_client():
         region_name=AWS_REGION,
     )
     return session.client("s3")
+
 
 def upload_json_to_s3(s3, bucket: str, key: str, obj: dict):
     body = json.dumps(obj, indent=2).encode("utf-8")
@@ -74,12 +82,13 @@ def upload_json_to_s3(s3, bucket: str, key: str, obj: dict):
         ContentType="application/json",
     )
 
+
 def init_db_engine():
     db_url = f"postgresql+psycopg2://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
     return create_engine(db_url, pool_pre_ping=True)
 
+
 def upsert_track(conn, track):
-    # Minimal normalization (we can enrich later)
     track_id = track["id"]
     name = track.get("name")
     popularity = track.get("popularity")
@@ -126,8 +135,8 @@ def upsert_track(conn, track):
         }
     )
 
+
 def ensure_user(conn, spotify_user_hash: str = "demo_user") -> int:
-    # For prototype: store hashed label; later can hash actual spotify user id.
     conn.execute(
         text("""
             INSERT INTO users (spotify_user_hash)
@@ -142,14 +151,37 @@ def ensure_user(conn, spotify_user_hash: str = "demo_user") -> int:
     ).scalar()
     return user_id
 
+
 def insert_user_top_track(conn, user_id: int, track_id: str, rank: int, time_range: str):
     conn.execute(
         text("""
-            INSERT INTO user_top_tracks (user_id, spotify_track_id, rank, time_range, pulled_at)
-            VALUES (:user_id, :spotify_track_id, :rank, :time_range, NOW())
+            INSERT INTO user_top_tracks (
+                user_id,
+                spotify_track_id,
+                rank,
+                time_range,
+                pulled_at
+            )
+            VALUES (
+                :user_id,
+                :spotify_track_id,
+                :rank,
+                :time_range,
+                NOW()
+            )
+            ON CONFLICT (user_id, spotify_track_id, time_range)
+            DO UPDATE SET
+                rank = EXCLUDED.rank,
+                pulled_at = NOW()
         """),
-        {"user_id": user_id, "spotify_track_id": track_id, "rank": rank, "time_range": time_range}
+        {
+            "user_id": user_id,
+            "spotify_track_id": track_id,
+            "rank": rank,
+            "time_range": time_range
+        }
     )
+
 
 def main():
     access_token = get_spotify_access_token()
@@ -179,6 +211,7 @@ def main():
             print(f"✅ Inserted {len(items)} top tracks into DB for time_range={tr}")
 
     print("✅ Done: Spotify top tracks ingested (raw to S3 + normalized to Postgres).")
+
 
 if __name__ == "__main__":
     main()

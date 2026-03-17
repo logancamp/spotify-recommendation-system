@@ -1,8 +1,37 @@
+"""
+cluster.py (Strategy B, audio-only NOW; weather/survey LATER)
+
+What this script does TODAY (audio-only):
+- Reads the user's long_term top tracks + audio features directly from Postgres
+  (tables: user_top_tracks, tracks, audio_features)
+- Runs KMeans clustering on audio feature vectors
+- Computes cluster centroids (mean feature vectors)
+- (Optional) Loads candidate tracks from catalog_tracks if your team builds it later
+- (Optional) Assigns candidates to the closest centroid using cosine similarity
+- Saves results to data/ for inspection
+
+How you'll add weather + survey later (high-level):
+- Add a new table (e.g., context_inputs) to store "mood/survey + weather" signals.
+- Have Streamlit write survey responses into context_inputs.
+- Have a weather fetch script write current weather into context_inputs.
+- Then in this script:
+    1) read the latest context_inputs row for the user
+    2) convert mood/weather into a "target preference vector" or weighting rules
+    3) re-rank candidates using:
+          final_score = alpha * cosine_to_centroid + beta * context_fit_score
+       OR filter to clusters whose centroids match the context (high energy for "hype", etc.)
+"""
+
+import os
 import pandas as pd
 from sklearn.cluster import KMeans
 from sklearn.metrics.pairwise import cosine_similarity
 
-# audio features used to describe how a song sounds
+from db_utils import read_df  # Postgres -> DataFrame helper (Strategy B)
+
+# -----------------------------
+# Audio features used to describe how a song sounds
+# -----------------------------
 AUDIO_FEATURE_COLS = [
     "acousticness",
     "danceability",
@@ -12,351 +41,264 @@ AUDIO_FEATURE_COLS = [
     "loudness",
     "speechiness",
     "tempo",
-    "valence"
-]
-
-# weather/context features used to cluster recent listening events
-WEATHER_FEATURE_COLS = [
-    "temperature_c",
-    "relative_humidity",
-    "wind_speed_m_s"
-]
-
-# optional weather/context features if present
-OPTIONAL_WEATHER_FEATURE_COLS = [
-    "dewpoint_c",
-    "visibility_m"
+    "valence",
 ]
 
 
-def _get_existing_weather_feature_cols(df):
-    cols = [col for col in WEATHER_FEATURE_COLS if col in df.columns]
-    cols += [col for col in OPTIONAL_WEATHER_FEATURE_COLS if col in df.columns]
-    return cols
+# ============================================================
+# 1) DB LOADERS
+# ============================================================
 
-
-def _get_weather_model_cols(weather_kmeans, profiles_df):
-    if hasattr(weather_kmeans, "feature_names_in_"):
-        return list(weather_kmeans.feature_names_in_)
-    return _get_existing_weather_feature_cols(profiles_df)
-
-
-def _build_weather_prediction_frame(today_weather_df, profiles_df, weather_cols):
-    profile_means = profiles_df[weather_cols].apply(pd.to_numeric, errors="coerce").mean()
-    current_weather_df = today_weather_df.reindex(columns=weather_cols).copy()
-
-    for col in weather_cols:
-        current_weather_df[col] = pd.to_numeric(current_weather_df[col], errors="coerce")
-        current_weather_df[col] = current_weather_df[col].fillna(profile_means[col])
-
-    if current_weather_df[weather_cols].isna().any(axis=None):
-        missing_cols = current_weather_df.columns[current_weather_df.isna().any()].tolist()
-        raise ValueError(
-            f"Today's weather input is missing usable values for required columns: {missing_cols}"
-        )
-
-    return current_weather_df[weather_cols]
-
-
-def _get_audio_column_map(df):
-    col_map = {}
-
-    for col in AUDIO_FEATURE_COLS:
-        if col in df.columns:
-            col_map[col] = col
-        elif f"recommended_{col}" in df.columns:
-            col_map[col] = f"recommended_{col}"
-        else:
-            raise ValueError(
-                f"Missing required audio feature column: '{col}' "
-                f"(also checked for 'recommended_{col}')"
-            )
-
-    return col_map
-
-
-def _validate_audio_cols(df):
-    _get_audio_column_map(df)
-
-
-# STEP 1: CLUSTER RECENTS BY WEATHER / CONTEXT
-def cluster_recents_by_weather(
-    input_file=None,
-    output_file=None,
-    profiles_output_file=None,
-    df=None,
-    n_clusters=4
-):
-
-    # Cluster recent listening events by weather/context only.
-    
+def load_user_profile_from_db(time_range: str = "long_term") -> pd.DataFrame:
     """
-    Input:
-    - enriched recents file/dataframe
-    - must already contain weather/context columns
-    - must also contain audio feature columns
+    Loads the user's profile tracks + audio features from Postgres.
 
-    Output:
-    - clustered recent listening events
-    - average audio profile for each learned weather cluster
+    Source tables:
+      user_top_tracks JOIN tracks JOIN audio_features
 
-    Important:
-    - songs are NOT clustered by weather directly
-    - listening events are clustered by weather/context
-    - each weather cluster gets an average audio profile based on songs listened to in that context
+    Returns columns needed for clustering plus metadata (name/artist).
     """
-    
-    # load data
-    if df is None:
-        if input_file is None:
-            raise ValueError("input_file must be provided when df is None")
-        df = pd.read_csv(input_file)
+    sql = f"""
+    SELECT
+      u.rank,
+      u.time_range,
+      t.spotify_track_id,
+      t.name,
+      t.primary_artist,
+      a.acousticness,
+      a.danceability,
+      a.energy,
+      a.instrumentalness,
+      a.liveness,
+      a.loudness,
+      a.speechiness,
+      a.tempo,
+      a.valence
+    FROM user_top_tracks u
+    JOIN tracks t
+      ON t.spotify_track_id = u.spotify_track_id
+    JOIN audio_features a
+      ON a.spotify_track_id = u.spotify_track_id
+    WHERE u.time_range = '{time_range}'
+    ORDER BY u.rank;
+    """
+    return read_df(sql)
 
+
+def load_candidates_from_db(limit: int = 500) -> pd.DataFrame:
+    """
+    Loads candidate tracks from Postgres IF catalog_tracks is populated.
+
+    Source tables:
+      catalog_tracks JOIN tracks JOIN audio_features
+
+    If your team hasn't built the catalog yet, this will likely return 0 rows.
+    """
+    sql = f"""
+    SELECT
+      c.catalog_id,
+      c.source,
+      c.query_used,
+      t.spotify_track_id,
+      t.name,
+      t.primary_artist,
+      a.acousticness,
+      a.danceability,
+      a.energy,
+      a.instrumentalness,
+      a.liveness,
+      a.loudness,
+      a.speechiness,
+      a.tempo,
+      a.valence
+    FROM catalog_tracks c
+    JOIN tracks t
+      ON t.spotify_track_id = c.spotify_track_id
+    JOIN audio_features a
+      ON a.spotify_track_id = c.spotify_track_id
+    ORDER BY c.pulled_at DESC
+    LIMIT {int(limit)};
+    """
+    return read_df(sql)
+
+
+# ============================================================
+# 2) DATA VALIDATION / CLEANING
+# ============================================================
+
+def validate_audio_cols(df: pd.DataFrame) -> None:
+    missing = [c for c in AUDIO_FEATURE_COLS if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required audio feature columns: {missing}")
+
+
+def coerce_numeric_audio(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    _validate_audio_cols(df)
+    for c in AUDIO_FEATURE_COLS:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df
 
-    # ensure weather/context features are numeric and handle missing values
-    weather_cols = _get_existing_weather_feature_cols(df)
-    if not weather_cols:
-        raise ValueError("No weather feature columns available for weather clustering")
 
-    for col in weather_cols + AUDIO_FEATURE_COLS:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
+# ============================================================
+# 3) CLUSTERING (AUDIO ONLY)
+# ============================================================
 
-    cluster_df = df.dropna(subset=weather_cols + AUDIO_FEATURE_COLS).copy()
+def cluster_tracks_by_audio(df: pd.DataFrame, n_clusters: int = 4, cluster_col: str = "audio_cluster"):
+    """
+    Run KMeans clustering on AUDIO_FEATURE_COLS.
 
-    if cluster_df.empty:
-        raise ValueError("No rows remain after dropping missing weather/audio values")
+    Returns:
+      clustered_df: df + cluster assignments
+      centroids_df: per-cluster average feature vector
+      kmeans model
+    """
+    df = df.copy()
+    validate_audio_cols(df)
+    df = coerce_numeric_audio(df)
 
-    # cluster by weather/context features only
-    weather_X = cluster_df[weather_cols]
-    distinct_weather_points = len(weather_X.drop_duplicates())
-    n_clusters = min(n_clusters, len(cluster_df), distinct_weather_points)
-    n_clusters = max(1, n_clusters)
+    clean_df = df.dropna(subset=AUDIO_FEATURE_COLS).copy()
+    if clean_df.empty:
+        raise ValueError("No rows remain after dropping missing audio feature values.")
 
-    kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-    cluster_df["weather_cluster"] = kmeans.fit_predict(weather_X)
+    X = clean_df[AUDIO_FEATURE_COLS]
+    distinct_points = len(X.drop_duplicates())
+    k = min(n_clusters, len(clean_df), distinct_points)
+    k = max(1, k)
 
-    # average song sound for each learned weather group
-    profile_df = (
-        cluster_df.groupby("weather_cluster")[AUDIO_FEATURE_COLS]
+    kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
+    clean_df[cluster_col] = kmeans.fit_predict(X)
+
+    centroids_df = (
+        clean_df.groupby(cluster_col)[AUDIO_FEATURE_COLS]
         .mean()
         .reset_index()
+        .rename(columns={cluster_col: "cluster_id"})
     )
 
-    # keep summary of weather side of each cluster for interpretation/debugging
-    weather_summary_df = (
-        cluster_df.groupby("weather_cluster")[weather_cols]
-        .mean()
-        .reset_index()
-    )
-
-    # add dominant weather label for each cluster if available (e.g. "Rain", "Clear", etc.)
-    if "weather_label" in cluster_df.columns:
-        mode_weather = (
-            cluster_df.groupby("weather_cluster")["weather_label"]
-            .agg(lambda x: x.mode().iloc[0] if not x.mode().empty else pd.NA)
-            .reset_index()
-            .rename(columns={"weather_label": "dominant_weather_label"})
-        )
-        profile_df = profile_df.merge(mode_weather, on="weather_cluster", how="left")
-    profile_df = profile_df.merge(weather_summary_df, on="weather_cluster", how="left")
-
-    # save outputs to csv
-    if output_file is not None:
-        cluster_df.to_csv(output_file, index=False)
-
-    if profiles_output_file is not None:
-        profile_df.to_csv(profiles_output_file, index=False)
-
-    return cluster_df, profile_df, kmeans
+    return clean_df, centroids_df, kmeans
 
 
-# STEP 2: ASSIGN NEW SONGS TO WEATHER-DERIVED GROUPS BY AUDIO SIMILARITY
-def assign_songs_to_weather_groups_by_audio_similarity(
-    songs_input=None,
-    profiles_input=None,
-    output_file=None,
-    songs_df=None,
-    profiles_df=None
-):
+def assign_candidates_to_centroids(candidates_df: pd.DataFrame, centroids_df: pd.DataFrame) -> pd.DataFrame:
     """
-    New songs do NOT need weather data.
+    Assign each candidate track to the most similar centroid using cosine similarity.
 
-    These are assigned to a weather group by comparing their audio features
-    to the average audio profile of each weather cluster.
+    Output columns added:
+      assigned_cluster_id
+      cluster_similarity
     """
-    if songs_df is None:
-        if songs_input is None:
-            raise ValueError("songs_input must be provided when songs_df is None")
-        songs_df = pd.read_csv(songs_input)
+    candidates_df = candidates_df.copy()
+    centroids_df = centroids_df.copy()
 
-    if profiles_df is None:
-        if profiles_input is None:
-            raise ValueError("profiles_input must be provided when profiles_df is None")
-        profiles_df = pd.read_csv(profiles_input)
+    validate_audio_cols(candidates_df)
+    validate_audio_cols(centroids_df)
 
-    songs_df = songs_df.copy()
-    profiles_df = profiles_df.copy()
+    candidates_df = coerce_numeric_audio(candidates_df)
+    centroids_df = coerce_numeric_audio(centroids_df)
 
-    songs_col_map = _get_audio_column_map(songs_df)
-    profiles_col_map = _get_audio_column_map(profiles_df)
+    cand_clean = candidates_df.dropna(subset=AUDIO_FEATURE_COLS).copy()
+    cent_clean = centroids_df.dropna(subset=AUDIO_FEATURE_COLS).copy()
 
-    for col in AUDIO_FEATURE_COLS:
-        songs_df[songs_col_map[col]] = pd.to_numeric(songs_df[songs_col_map[col]], errors="coerce")
-        profiles_df[profiles_col_map[col]] = pd.to_numeric(profiles_df[profiles_col_map[col]], errors="coerce")
+    if cand_clean.empty:
+        raise ValueError("No candidate rows remain after dropping missing audio feature values.")
+    if cent_clean.empty:
+        raise ValueError("No centroid rows remain after dropping missing audio feature values.")
 
-    songs_clean = songs_df.dropna(subset=[songs_col_map[col] for col in AUDIO_FEATURE_COLS]).copy()
-    profiles_clean = profiles_df.dropna(subset=[profiles_col_map[col] for col in AUDIO_FEATURE_COLS]).copy()
+    sim = cosine_similarity(cand_clean[AUDIO_FEATURE_COLS], cent_clean[AUDIO_FEATURE_COLS])
+    best_idx = sim.argmax(axis=1)
+    best_score = sim.max(axis=1)
 
-    if songs_clean.empty:
-        raise ValueError("No songs remain after dropping missing audio feature values")
+    cand_clean["assigned_cluster_id"] = [int(cent_clean.iloc[i]["cluster_id"]) for i in best_idx]
+    cand_clean["cluster_similarity"] = best_score
 
-    if profiles_clean.empty:
-        raise ValueError("No weather profiles remain after dropping missing audio feature values")
-
-    songs_audio_df = pd.DataFrame({
-        col: songs_clean[songs_col_map[col]]
-        for col in AUDIO_FEATURE_COLS
-    })
-
-    profiles_audio_df = pd.DataFrame({
-        col: profiles_clean[profiles_col_map[col]]
-        for col in AUDIO_FEATURE_COLS
-    })
-
-    similarity_matrix = cosine_similarity(
-        songs_audio_df,
-        profiles_audio_df
-    )
-
-    best_profile_idx = similarity_matrix.argmax(axis=1)
-    best_profile_scores = similarity_matrix.max(axis=1)
-
-    songs_clean["weather_cluster"] = [
-        profiles_clean.iloc[idx]["weather_cluster"] for idx in best_profile_idx
-    ]
-    songs_clean["weather_cluster_similarity"] = best_profile_scores
-
-    if "dominant_weather_label" in profiles_clean.columns:
-        songs_clean["assigned_weather_label"] = [
-            profiles_clean.iloc[idx]["dominant_weather_label"] for idx in best_profile_idx
-        ]
-
-    if output_file is not None:
-        songs_clean.to_csv(output_file, index=False)
-
-    return songs_clean
+    return cand_clean
 
 
-# STEP 3: MAP TODAY'S WEATHER TO A LEARNED WEATHER CLUSTER
-def get_weather_cluster_from_today_weather(
-    today_weather_input=None,
-    today_weather_df=None,
-    profiles_input=None,
-    profiles_df=None,
-    weather_kmeans=None
-):
+# ============================================================
+# 4) (FUTURE) CONTEXT SUPPORT: WEATHER + SURVEY
+# ============================================================
+
+def context_fit_score(row: pd.Series, context: dict) -> float:
     """
-    Use today's weather/context row (already collected elsewhere) and map it
-    to one of the learned weather clusters.
+    FUTURE: Convert mood/weather context into a score for how well a track "fits".
 
-    today_weather_input should contain a row with weather fields like:
-    temperature_c, relative_humidity, wind_speed_m_s, etc.
+    Example idea (simple):
+      - If mood == 'hype', reward high energy and higher tempo.
+      - If mood == 'calm', reward low energy and higher acousticness.
+      - If weather == 'rain', reward lower valence, lower tempo (optional).
+
+    Return a float score, e.g. between 0 and 1.
+
+    For now: returns 0.0 (no effect).
     """
-    if today_weather_df is None:
-        if today_weather_input is None:
-            raise ValueError("today_weather_input must be provided when today_weather_df is None")
-        today_weather_df = pd.read_csv(today_weather_input)
-
-    if profiles_df is None:
-        if profiles_input is None:
-            raise ValueError("profiles_input must be provided when profiles_df is None")
-        profiles_df = pd.read_csv(profiles_input)
-
-    if weather_kmeans is None:
-        raise ValueError("weather_kmeans is required")
-
-    today_weather_df = today_weather_df.copy()
-    profiles_df = profiles_df.copy()
-
-    if len(today_weather_df) == 0:
-        raise ValueError("today_weather_df is empty")
-
-    weather_cols = _get_weather_model_cols(weather_kmeans, profiles_df)
-    if not weather_cols:
-        raise ValueError("No weather feature columns found in profiles")
-
-    current_weather_df = _build_weather_prediction_frame(
-        today_weather_df=today_weather_df,
-        profiles_df=profiles_df,
-        weather_cols=weather_cols
-    )
-    cluster_id = int(weather_kmeans.predict(current_weather_df[weather_cols])[0])
-
-    matching_profile = profiles_df[profiles_df["weather_cluster"] == cluster_id].copy()
-
-    return cluster_id, matching_profile
+    return 0.0
 
 
-# STEP 4: FILTER SONGS FOR TODAY'S WEATHER GROUP
-def filter_songs_for_today_weather_cluster(
-    assigned_songs_input=None,
-    assigned_songs_df=None,
-    target_cluster=None,
-    output_file=None
-):
+def rerank_with_context(assigned_df: pd.DataFrame, context: dict, alpha: float = 1.0, beta: float = 0.0) -> pd.DataFrame:
     """
-    Keep only songs that belong to the weather-derived music group
-    for TODAY's weather cluster.
+    FUTURE: Combine similarity score with context-based score.
+
+    final_score = alpha * cluster_similarity + beta * context_fit_score
+
+    For now beta=0.0 so it's purely audio similarity.
     """
-    if assigned_songs_df is None:
-        if assigned_songs_input is None:
-            raise ValueError("assigned_songs_input must be provided when assigned_songs_df is None")
-        assigned_songs_df = pd.read_csv(assigned_songs_input)
+    df = assigned_df.copy()
+    if "cluster_similarity" not in df.columns:
+        raise ValueError("assigned_df must include 'cluster_similarity' column.")
+    df["context_score"] = df.apply(lambda r: context_fit_score(r, context), axis=1)
+    df["final_score"] = alpha * df["cluster_similarity"] + beta * df["context_score"]
+    return df.sort_values("final_score", ascending=False)
 
-    if target_cluster is None:
-        raise ValueError("target_cluster is required")
 
-    assigned_songs_df = assigned_songs_df.copy()
-    filtered_df = assigned_songs_df[assigned_songs_df["weather_cluster"] == target_cluster].copy()
-
-    if output_file is not None:
-        filtered_df.to_csv(output_file, index=False)
-
-    return filtered_df
-    
+# ============================================================
+# MAIN
+# ============================================================
 
 if __name__ == "__main__":
-    # 1) cluster enriched recents by weather/context
-    clustered_recents_df, weather_audio_profiles_df, weather_kmeans = cluster_recents_by_weather(
-        input_file="data/recent_tracks_enriched_weather.csv",
-        output_file="data/recent_tracks_enriched_weather_clustered.csv",
-        profiles_output_file="data/weather_audio_profiles.csv",
-        n_clusters=4
-    )
+    """
+    Default behavior: DB + audio-only.
+    This matches your current Airflow pipeline outputs.
+    """
 
-    # 2) assign candidate songs/catalog songs into those weather-derived groups by audio similarity
-    assigned_songs_df = assign_songs_to_weather_groups_by_audio_similarity(
-        songs_input="data/track_recommendations.csv",
-        profiles_input="data/weather_audio_profiles.csv",
-        output_file="data/track_recommendations_weather_assigned.csv"
-    )
+    # 1) Load user profile from DB
+    profile_df = load_user_profile_from_db(time_range="long_term")
+    print("Loaded profile rows from Postgres:", len(profile_df))
+    if profile_df.empty:
+        raise SystemExit(
+            "No profile rows returned. Run your Airflow DAG first to populate user_top_tracks + audio_features."
+        )
 
-    # 3) map today's weather row (collected elsewhere) into one of the learned weather clusters
-    today_cluster_id, today_profile_df = get_weather_cluster_from_today_weather(
-        today_weather_input="data/today_weather.csv",
-        profiles_input="data/weather_audio_profiles.csv",
-        weather_kmeans=weather_kmeans
-    )
+    # 2) Cluster user profile tracks
+    clustered_profile_df, centroids_df, _kmeans = cluster_tracks_by_audio(profile_df, n_clusters=4, cluster_col="audio_cluster")
+    print("Cluster counts:")
+    print(clustered_profile_df["audio_cluster"].value_counts().sort_index())
 
-    # 4) keep only songs that match today's weather-derived music group
-    today_weather_playlist_df = filter_songs_for_today_weather_cluster(
-        assigned_songs_input="data/track_recommendations_weather_assigned.csv",
-        target_cluster=today_cluster_id,
-        output_file="data/today_weather_playlist_candidates.csv"
-    )
-    
-    print(clustered_recents_df["weather_cluster"].value_counts().sort_index())
-    
+    # 3) Load candidates (if catalog exists); otherwise reuse profile for demo
+    candidates_df = load_candidates_from_db(limit=500)
+    if len(candidates_df) == 0:
+        print("catalog_tracks is empty. Using profile tracks as demo candidates.")
+        candidates_df = profile_df.copy()
+
+    # 4) Assign candidates to closest centroid
+    assigned_candidates_df = assign_candidates_to_centroids(candidates_df, centroids_df)
+    print("Assigned candidates rows:", len(assigned_candidates_df))
+    print(assigned_candidates_df.head())
+
+    # 5) (Optional, future) rerank with context (beta=0 for now)
+    context = {}  # later: load latest survey+weather from DB (context_inputs)
+    final_df = rerank_with_context(assigned_candidates_df, context=context, alpha=1.0, beta=0.0)
+
+    # 6) Save outputs for inspection/demo
+    os.makedirs("data", exist_ok=True)
+    clustered_profile_df.to_csv("data/profile_tracks_clustered_db.csv", index=False)
+    centroids_df.to_csv("data/audio_cluster_centroids_db.csv", index=False)
+    assigned_candidates_df.to_csv("data/candidates_assigned_db.csv", index=False)
+    final_df.to_csv("data/candidates_ranked_db.csv", index=False)
+
+    print("Saved outputs to data/:")
+    print("- data/profile_tracks_clustered_db.csv")
+    print("- data/audio_cluster_centroids_db.csv")
+    print("- data/candidates_assigned_db.csv")
+    print("- data/candidates_ranked_db.csv")
+
+    print("\nNext (later): Add weather/survey by creating a context_inputs table + Streamlit UI,")
+    print("then set beta>0 in rerank_with_context() to activate context-based ranking.")

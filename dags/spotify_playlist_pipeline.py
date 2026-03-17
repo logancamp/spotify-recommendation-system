@@ -2,8 +2,10 @@ from airflow import DAG
 from airflow.operators.bash import BashOperator
 from datetime import datetime
 
-AIRFLOW_HOME = "/D/tdo18/airflow" 
-PROJECT_DIR = f"{AIRFLOW_HOME}/spotify_pipeline"
+# Repo is the source of truth
+REPO_ROOT = "/D/tdo18/OneDrive/CSDS417/spotify-recommendation-system"
+PIPELINE_DIR = f"{REPO_ROOT}/pipeline/spotify_pipeline"
+ANALYTICS_DIR = REPO_ROOT
 
 with DAG(
     dag_id="spotify_playlist_pipeline",
@@ -15,17 +17,22 @@ with DAG(
 
     extract_and_store_top_tracks = BashOperator(
         task_id="extract_and_store_top_tracks",
-        bash_command=f"cd {PROJECT_DIR} && python scripts/ingest_spotify_top_tracks.py",
+        bash_command=f"cd {PIPELINE_DIR} && python scripts/ingest_spotify_top_tracks.py",
     )
 
     enrich_audio_features = BashOperator(
         task_id="enrich_audio_features",
-        bash_command=f"cd {PROJECT_DIR} && python scripts/enrich_audio_features_from_reccobeats.py",
+        bash_command=f"cd {PIPELINE_DIR} && python scripts/enrich_audio_features_from_reccobeats.py",
     )
 
     upload_missing_report = BashOperator(
         task_id="upload_missing_audio_features_report",
-        bash_command=f"cd {PROJECT_DIR} && python scripts/upload_missing_audio_features_report.py",
+        bash_command=f"cd {PIPELINE_DIR} && python scripts/upload_missing_audio_features_report.py",
     )
 
-    extract_and_store_top_tracks >> enrich_audio_features >> upload_missing_report
+    run_audio_clustering = BashOperator(
+        task_id="run_audio_clustering",
+        bash_command=f"cd {ANALYTICS_DIR} && python cluster.py",
+    )
+
+    extract_and_store_top_tracks >> enrich_audio_features >> upload_missing_report >> run_audio_clustering

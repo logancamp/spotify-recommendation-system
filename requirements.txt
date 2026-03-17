@@ -1,0 +1,10 @@
+requests
+python-dotenv
+boto3
+sqlalchemy
+psycopg2-binary
+flask
+pandas
+numpy
+scikit-learn
+matplotlib

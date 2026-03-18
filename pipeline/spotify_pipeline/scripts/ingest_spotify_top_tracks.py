@@ -51,6 +51,17 @@ def get_spotify_access_token() -> str:
     return resp.json()["access_token"]
 
 
+def get_current_spotify_user(access_token: str) -> dict:
+    url = "https://api.spotify.com/v1/me"
+    resp = requests.get(
+        url,
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=20,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
 def spotify_get_top_tracks(access_token: str, time_range: str, limit: int = 50):
     url = "https://api.spotify.com/v1/me/top/tracks"
     resp = requests.get(
@@ -136,7 +147,7 @@ def upsert_track(conn, track):
     )
 
 
-def ensure_user(conn, spotify_user_hash: str = "demo_user") -> int:
+def ensure_user(conn, spotify_user_hash: str) -> int:
     conn.execute(
         text("""
             INSERT INTO users (spotify_user_hash)
@@ -185,6 +196,11 @@ def insert_user_top_track(conn, user_id: int, track_id: str, rank: int, time_ran
 
 def main():
     access_token = get_spotify_access_token()
+    current_user = get_current_spotify_user(access_token)
+    spotify_user_id = current_user["id"]
+
+    print(f"Using Spotify user id: {spotify_user_id}")
+
     s3 = init_s3_client()
     engine = init_db_engine()
 
@@ -192,13 +208,13 @@ def main():
     time_ranges = ["short_term", "medium_term", "long_term"]
 
     with engine.begin() as conn:
-        user_id = ensure_user(conn, spotify_user_hash="tdo18_demo")
+        user_id = ensure_user(conn, spotify_user_hash=spotify_user_id)
 
         for tr in time_ranges:
             data = spotify_get_top_tracks(access_token, tr, limit=50)
 
             # 1) Save raw to S3
-            key = f"raw/spotify/top_tracks/tdo18_demo/{tr}/top_tracks_{pulled_at}.json"
+            key = f"raw/spotify/top_tracks/{spotify_user_id}/{tr}/top_tracks_{pulled_at}.json"
             upload_json_to_s3(s3, S3_BUCKET, key, data)
             print(f"✅ Uploaded raw Spotify top tracks to s3://{S3_BUCKET}/{key}")
 

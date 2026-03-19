@@ -12,6 +12,7 @@ load_dotenv()
 # ---------- Spotify ----------
 CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
 CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
+REFRESH_TOKEN = os.getenv("SPOTIFY_REFRESH_TOKEN")
 
 # ---------- DB ----------
 DB_HOST = os.getenv("DB_HOST")
@@ -20,7 +21,7 @@ DB_NAME = os.getenv("DB_NAME")
 DB_USER = os.getenv("DB_USER")
 DB_PASSWORD = os.getenv("DB_PASSWORD")
 
-if not all([CLIENT_ID, CLIENT_SECRET, DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD]):
+if not all([CLIENT_ID, CLIENT_SECRET, REFRESH_TOKEN, DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD]):
     raise SystemExit("Missing Spotify or DB values in .env")
 
 db_url = f"postgresql+psycopg2://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
@@ -28,6 +29,10 @@ engine = create_engine(db_url, pool_pre_ping=True)
 
 
 def get_access_token():
+    """
+    Use refresh-token flow so we can call /v1/me and tie candidate generation
+    to the real current Spotify user.
+    """
     token_url = "https://accounts.spotify.com/api/token"
     auth_header = base64.b64encode(f"{CLIENT_ID}:{CLIENT_SECRET}".encode()).decode()
 
@@ -37,11 +42,26 @@ def get_access_token():
             "Authorization": f"Basic {auth_header}",
             "Content-Type": "application/x-www-form-urlencoded",
         },
-        data={"grant_type": "client_credentials"},
+        data={
+            "grant_type": "refresh_token",
+            "refresh_token": REFRESH_TOKEN,
+        },
         timeout=20,
     )
     resp.raise_for_status()
     return resp.json()["access_token"]
+
+
+def get_current_spotify_user(access_token: str) -> dict:
+    url = "https://api.spotify.com/v1/me"
+    resp = requests.get(
+        url,
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=20,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
 
 def spotify_search_tracks(access_token, query, limit=10):
     url = "https://api.spotify.com/v1/search"
@@ -64,11 +84,8 @@ def spotify_search_tracks(access_token, query, limit=10):
 
     return resp.json()
 
-def ensure_demo_user(conn, spotify_user_hash="tdo18_demo"):
-    """
-    For now we keep the same prototype user pattern you already used.
-    Later this should come from the real Spotify user identity.
-    """
+
+def ensure_user(conn, spotify_user_hash: str):
     conn.execute(
         text("""
             INSERT INTO users (spotify_user_hash)
@@ -82,6 +99,7 @@ def ensure_demo_user(conn, spotify_user_hash="tdo18_demo"):
         {"h": spotify_user_hash}
     ).scalar()
     return user_id
+
 
 def upsert_track(conn, track):
     track_id = track["id"]
@@ -183,9 +201,10 @@ def save_raw_search_result(query, data):
     print(f"Saved raw candidate search JSON: {out_file}")
     return str(out_file)
 
-def derive_search_seeds_from_profile(conn, limit=10):
+
+def derive_search_seeds_from_profile(conn, user_id: int, limit=10):
     """
-    Build candidate-search seeds from the user's actual profile.
+    Build candidate-search seeds from the current user's actual profile.
     For now, use top artist names from long_term tracks.
     """
     rows = conn.execute(
@@ -196,13 +215,14 @@ def derive_search_seeds_from_profile(conn, limit=10):
             FROM user_top_tracks u
             JOIN tracks t
               ON t.spotify_track_id = u.spotify_track_id
-            WHERE u.time_range = 'long_term'
+            WHERE u.user_id = :user_id
+              AND u.time_range = 'long_term'
               AND t.primary_artist IS NOT NULL
             GROUP BY t.primary_artist
             ORDER BY artist_count DESC, t.primary_artist
             LIMIT :limit
         """),
-        {"limit": limit}
+        {"user_id": user_id, "limit": limit}
     ).fetchall()
 
     seeds = []
@@ -216,14 +236,26 @@ def derive_search_seeds_from_profile(conn, limit=10):
 
     return seeds
 
+
 def main():
     access_token = get_access_token()
-    total_inserted = 0
+    total_attempted = 0
+
+    current_user = get_current_spotify_user(access_token)
+    spotify_user_id = current_user["id"]
+
+    print(f"Using Spotify user id for candidate pool: {spotify_user_id}")
 
     with engine.begin() as conn:
-        user_id = ensure_demo_user(conn, spotify_user_hash="tdo18_demo")
+        user_id = ensure_user(conn, spotify_user_hash=spotify_user_id)
 
-        search_seeds = derive_search_seeds_from_profile(conn, limit=10)
+        search_seeds = derive_search_seeds_from_profile(conn, user_id=user_id, limit=10)
+
+        if not search_seeds:
+            raise SystemExit(
+                f"No profile-derived search seeds found for user_id={user_id}. "
+                "Run ingest_spotify_top_tracks.py first for this Spotify user."
+            )
 
         print("Using profile-derived candidate seeds:")
         for s in search_seeds:
@@ -248,9 +280,10 @@ def main():
                     seed_value=seed["seed_value"],
                     raw_json=track
                 )
-                total_inserted += 1
+                total_attempted += 1
 
-    print(f"✅ Done. Inserted {total_inserted} catalog_tracks rows.")
+    print(f"✅ Done. Attempted {total_attempted} catalog_tracks inserts.")
+
 
 if __name__ == "__main__":
     main()

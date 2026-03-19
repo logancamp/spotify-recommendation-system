@@ -6,7 +6,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-RANKED_FILE = "data/candidates_ranked_db.csv"
 TOP_N = 10
 
 SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
@@ -82,20 +81,12 @@ def chunk_list(items, size):
 
 
 def add_tracks_to_playlist(access_token, playlist_id, track_uris):
-    """
-    Uses the current Spotify endpoint:
-      POST /v1/playlists/{playlist_id}/items
-
-    Sends URIs as query-string params, which is supported by the docs.
-    """
     if not track_uris:
         raise SystemExit("No track URIs provided to add to playlist.")
 
     url = f"https://api.spotify.com/v1/playlists/{playlist_id}/items"
     snapshot_ids = []
 
-    # Spotify supports up to 100 items per request; we only have 10,
-    # but batching keeps the function safe for later.
     for batch in chunk_list(track_uris, 100):
         resp = requests.post(
             url,
@@ -119,8 +110,16 @@ def add_tracks_to_playlist(access_token, playlist_id, track_uris):
     return {"snapshot_ids": snapshot_ids}
 
 
-def load_top_unique_recommendations():
-    df = pd.read_csv(RANKED_FILE)
+def load_top_unique_recommendations(user_hash: str):
+    ranked_file = f"data/{user_hash}_candidates_ranked_db.csv"
+
+    if not os.path.exists(ranked_file):
+        raise SystemExit(
+            f"Ranked file not found for current user: {ranked_file}\n"
+            "Run cluster.py first for this user."
+        )
+
+    df = pd.read_csv(ranked_file)
 
     if df.empty:
         raise SystemExit("Ranked file is empty.")
@@ -136,24 +135,26 @@ def load_top_unique_recommendations():
 
     top_df = df.head(TOP_N).copy()
     top_df["spotify_uri"] = top_df["spotify_track_id"].apply(lambda x: f"spotify:track:{x}")
-    return top_df
+    return ranked_file, top_df
 
 
 def main():
-    top_df = load_top_unique_recommendations()
-
     access_token = get_spotify_access_token()
     user = get_current_user_profile(access_token)
+    user_hash = user["id"]
 
     print("Spotify current user:")
     print("id:", user.get("id"))
     print("display_name:", user.get("display_name"))
     print("product:", user.get("product"))
 
+    ranked_file, top_df = load_top_unique_recommendations(user_hash=user_hash)
+    print(f"\nUsing ranked file: {ranked_file}")
+
     playlist = create_playlist(
         access_token=access_token,
         playlist_name="CSDS 417 Recommended Playlist",
-        description="Generated from ranked recommendations in the CSDS 417 project"
+        description=f"Generated from ranked recommendations for Spotify user {user_hash}"
     )
 
     print("\n✅ Playlist created successfully")

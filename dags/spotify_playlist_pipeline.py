@@ -2,7 +2,11 @@ from airflow import DAG
 from airflow.operators.bash import BashOperator
 from datetime import datetime
 
-REPO_ROOT = "/D/tdo18/OneDrive/CSDS417/spotify-recommendation-system"
+#REPO_ROOT = "/D/tdo18/OneDrive/CSDS417/spotify-recommendation-system"
+#PIPELINE_DIR = f"{REPO_ROOT}/pipeline/spotify_pipeline"
+#ANALYTICS_DIR = REPO_ROOT
+
+REPO_ROOT = "/home/tdo18/Documents/spotify-recommendation-system"
 PIPELINE_DIR = f"{REPO_ROOT}/pipeline/spotify_pipeline"
 ANALYTICS_DIR = REPO_ROOT
 

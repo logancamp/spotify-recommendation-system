@@ -8,3 +8,5 @@ pandas
 numpy
 scikit-learn
 matplotlib
+streamlit
+spotipy

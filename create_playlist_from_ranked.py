@@ -3,6 +3,7 @@ import base64
 import requests
 import pandas as pd
 from dotenv import load_dotenv
+from db_utils import read_df
 
 load_dotenv()
 
@@ -111,28 +112,53 @@ def add_tracks_to_playlist(access_token, playlist_id, track_uris):
 
 
 def load_top_unique_recommendations(user_hash: str):
-    ranked_file = f"data/{user_hash}_candidates_ranked_db.csv"
+    """
+    Load top ranked recommendations for the given Spotify user.
+    Primary source: ranked_recommendations table in Postgres.
+    Fallback: per-user CSV in data/ (for local debug/demo if DB is unavailable).
+    """
+    sql = f"""
+        SELECT
+            rr.spotify_track_id,
+            rr.name,
+            rr.primary_artist,
+            rr.final_score,
+            rr.rank_position
+        FROM ranked_recommendations rr
+        JOIN users u ON u.user_id = rr.user_id
+        WHERE u.spotify_user_hash = '{user_hash}'
+        ORDER BY rr.rank_position
+        LIMIT {TOP_N};
+    """
 
+    try:
+        df = read_df(sql)
+        if not df.empty:
+            print(f"Reading ranked recommendations from Postgres (user={user_hash})")
+            df["spotify_uri"] = df["spotify_track_id"].apply(lambda x: f"spotify:track:{x}")
+            return "postgres:ranked_recommendations", df
+        else:
+            print("WARNING: ranked_recommendations is empty in DB — falling back to CSV.")
+    except Exception as e:
+        print(f"WARNING: Could not read from DB ({e}) — falling back to CSV.")
+
+    # CSV fallback
+    ranked_file = f"data/{user_hash}_candidates_ranked_db.csv"
     if not os.path.exists(ranked_file):
         raise SystemExit(
-            f"Ranked file not found for current user: {ranked_file}\n"
+            f"No ranked data found in DB or on disk for user: {user_hash}\n"
             "Run cluster.py first for this user."
         )
 
     df = pd.read_csv(ranked_file)
-
     if df.empty:
-        raise SystemExit("Ranked file is empty.")
+        raise SystemExit("Ranked CSV is empty.")
+    if "spotify_track_id" not in df.columns or "final_score" not in df.columns:
+        raise SystemExit("Ranked CSV is missing required columns.")
 
-    if "spotify_track_id" not in df.columns:
-        raise SystemExit("Expected column 'spotify_track_id' not found in ranked CSV.")
-
-    if "final_score" not in df.columns:
-        raise SystemExit("Expected column 'final_score' not found in ranked CSV.")
-
-    df = df.sort_values("final_score", ascending=False).copy()
-    df = df.drop_duplicates(subset=["spotify_track_id"], keep="first").copy()
-
+    df = df.sort_values("final_score", ascending=False).drop_duplicates(
+        subset=["spotify_track_id"], keep="first"
+    )
     top_df = df.head(TOP_N).copy()
     top_df["spotify_uri"] = top_df["spotify_track_id"].apply(lambda x: f"spotify:track:{x}")
     return ranked_file, top_df

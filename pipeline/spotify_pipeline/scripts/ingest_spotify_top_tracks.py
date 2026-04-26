@@ -38,6 +38,11 @@ if not all(required):
 
 
 def get_spotify_access_token() -> str:
+    # if streamlit already got us a token, use that instead of doing the refresh flow
+    injected = os.getenv("SPOTIFY_ACCESS_TOKEN")
+    if injected:
+        return injected
+
     token_url = "https://accounts.spotify.com/api/token"
     auth_header = base64.b64encode(f"{CLIENT_ID}:{CLIENT_SECRET}".encode()).decode()
 
@@ -220,11 +225,33 @@ def main():
 
             # 2) Normalize into DB
             items = data.get("items", [])
+            current_track_ids = [track["id"] for track in items]
+
             for idx, track in enumerate(items, start=1):
                 upsert_track(conn, track)
                 insert_user_top_track(conn, user_id, track["id"], rank=idx, time_range=tr)
 
-            print(f"✅ Inserted {len(items)} top tracks into DB for time_range={tr}")
+            # 3) remove tracks that are no longer in the user's top tracks for this time range
+            #    keeps the table up to date instead of accumulating stale rows
+            if current_track_ids:
+                placeholders = ", ".join(f":id_{i}" for i in range(len(current_track_ids)))
+                params = {f"id_{i}": tid for i, tid in enumerate(current_track_ids)}
+                params["user_id"] = user_id
+                params["time_range"] = tr
+                deleted = conn.execute(
+                    text(f"""
+                        DELETE FROM user_top_tracks
+                        WHERE user_id = :user_id
+                          AND time_range = :time_range
+                          AND spotify_track_id NOT IN ({placeholders})
+                    """),
+                    params,
+                )
+                stale_count = deleted.rowcount
+                if stale_count > 0:
+                    print(f"🗑️  Removed {stale_count} stale rows from user_top_tracks for time_range={tr}")
+
+            print(f"✅ Inserted/updated {len(items)} top tracks into DB for time_range={tr}")
 
     print("✅ Done: Spotify top tracks ingested (raw to S3 + normalized to Postgres).")
 

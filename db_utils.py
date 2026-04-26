@@ -3,15 +3,13 @@ from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 import pandas as pd
 
-# Loads .env from the current working directory (repo root) by default
+# load env vars from .env file
 load_dotenv()
 
 def get_engine():
     """
-    Creates a SQLAlchemy engine using DB_* values from .env
-
-    Required .env fields:
-      DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD
+    Build a SQLAlchemy engine from the DB_* env vars in .env.
+    Throws a clear error if any required values are missing.
     """
     host = os.getenv("DB_HOST")
     port = os.getenv("DB_PORT")
@@ -35,11 +33,9 @@ def get_engine():
 
 def read_df(sql: str):
     """
-    Run SQL query -> return pandas DataFrame.
-
-    We intentionally DO NOT use pandas.read_sql() here because in some
-    environments pandas attempts to call DBAPI cursor() methods on
-    SQLAlchemy objects. This manual approach is stable.
+    Run a SQL query and return the results as a pandas DataFrame.
+    We use the manual fetch approach instead of pd.read_sql() because
+    pd.read_sql() had some issues with our sqlalchemy version.
     """
     eng = get_engine()
     with eng.connect() as conn:
@@ -47,3 +43,45 @@ def read_df(sql: str):
         rows = result.fetchall()
         cols = list(result.keys())
     return pd.DataFrame(rows, columns=cols)
+
+
+def write_ranked_recommendations(user_id: int, final_df: "pd.DataFrame") -> int:
+    """
+    Save the ranked recommendations to postgres for a given user.
+    Deletes the old recommendations first so we always have a fresh set.
+    rank_position is 1-indexed (1 = best match).
+    Returns how many rows were written.
+    """
+    eng = get_engine()
+
+    rows = []
+    for rank_position, (_, row) in enumerate(
+        final_df.sort_values("final_score", ascending=False).iterrows(), start=1
+    ):
+        rows.append({
+            "user_id": int(user_id),
+            "spotify_track_id": row["spotify_track_id"],
+            "name": row.get("name"),
+            "primary_artist": row.get("primary_artist"),
+            "final_score": float(row["final_score"]),
+            "rank_position": rank_position,
+        })
+
+    with eng.begin() as conn:
+        # wipe out old recommendations for this user before inserting new ones
+        conn.execute(
+            text("DELETE FROM ranked_recommendations WHERE user_id = :user_id"),
+            {"user_id": int(user_id)},
+        )
+        if rows:
+            conn.execute(
+                text("""
+                    INSERT INTO ranked_recommendations
+                        (user_id, spotify_track_id, name, primary_artist, final_score, rank_position)
+                    VALUES
+                        (:user_id, :spotify_track_id, :name, :primary_artist, :final_score, :rank_position)
+                """),
+                rows,
+            )
+
+    return len(rows)

@@ -6,14 +6,14 @@ from datetime import datetime
 #PIPELINE_DIR = f"{REPO_ROOT}/pipeline/spotify_pipeline"
 #ANALYTICS_DIR = REPO_ROOT
 
-REPO_ROOT = "/home/tdo18/Documents/spotify-recommendation-system"
+REPO_ROOT = "/D/tdo18/Documents/spotify-recommendation-system"
 PIPELINE_DIR = f"{REPO_ROOT}/pipeline/spotify_pipeline"
 ANALYTICS_DIR = REPO_ROOT
 
 with DAG(
     dag_id="spotify_playlist_pipeline",
     start_date=datetime(2024, 2, 1),
-    schedule=None,
+    schedule="0 8,20 * * *",  # runs at 8am and 8pm every day
     catchup=False,
     tags=["csds417", "spotify", "reccobeats", "data-engineering"],
 ) as dag:
@@ -72,11 +72,9 @@ with DAG(
         ),
     )
 
-    fetch_weather_from_recently_played = BashOperator(
+    fetch_weather = BashOperator(
         task_id="fetch_weather_from_recently_played",
-        bash_command=(
-            "echo 'TODO: fetch weather data using recently played played_at timestamps'"
-        ),
+        bash_command=f"cd {ANALYTICS_DIR} && python data-collect/collect_weather_today.py",
     )
 
     join_recently_played_with_weather = BashOperator(
@@ -107,8 +105,8 @@ with DAG(
     build_candidate_pool >> enrich_candidate_audio_features
 
     # Context branch
-    extract_recently_played >> fetch_weather_from_recently_played
-    fetch_weather_from_recently_played >> join_recently_played_with_weather
+    extract_recently_played >> fetch_weather
+    fetch_weather >> join_recently_played_with_weather
     join_recently_played_with_weather >> prepare_context_inputs
 
     # Recommendation engine

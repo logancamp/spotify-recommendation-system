@@ -30,9 +30,13 @@ engine = create_engine(db_url, pool_pre_ping=True)
 
 def get_access_token():
     """
-    Use refresh-token flow so we can call /v1/me and tie candidate generation
-    to the real current Spotify user.
+    Get a spotify access token. If one was injected from streamlit, use that.
+    Otherwise do the normal refresh token flow.
     """
+    injected = os.getenv("SPOTIFY_ACCESS_TOKEN")
+    if injected:
+        return injected
+
     token_url = "https://accounts.spotify.com/api/token"
     auth_header = base64.b64encode(f"{CLIENT_ID}:{CLIENT_SECRET}".encode()).decode()
 

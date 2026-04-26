@@ -1,26 +1,14 @@
 """
-cluster.py (Strategy B, audio-only NOW; weather/survey LATER)
+cluster.py
 
-What this script does TODAY (audio-only):
-- Gets the current Spotify user from /v1/me using the refresh token
-- Reads THAT user's long_term top tracks + audio features directly from Postgres
-  (tables: users, user_top_tracks, tracks, audio_features)
-- Runs KMeans clustering on audio feature vectors
-- Loads THAT user's candidate tracks from catalog_tracks
-- Assigns candidates to the closest centroid using cosine similarity
-- Deduplicates final ranked output by spotify_track_id
-- Saves results to data/ for inspection
+Loads the current user's top tracks from postgres, runs kmeans clustering on their
+audio features, then finds the best matching candidate tracks using cosine similarity.
 
-How you'll add weather + survey later (high-level):
-- Add a new table (e.g., context_inputs) to store "mood/survey + weather" signals.
-- Have Streamlit write survey responses into context_inputs.
-- Have a weather fetch script write current weather into context_inputs.
-- Then in this script:
-    1) read the latest context_inputs row for the user
-    2) convert mood/weather into a "target preference vector" or weighting rules
-    3) re-rank candidates using:
-          final_score = alpha * cosine_to_centroid + beta * context_fit_score
-       OR filter to clusters whose centroids match the context
+The idea is that we group the user's taste into clusters (like "chill songs" vs "hype songs"),
+then for each candidate we see which cluster it's closest to.
+
+We also added weather context scoring - if it's rainy we bump up acoustic/low-energy tracks,
+if it's hot we favor danceable stuff, etc. That part is controlled by beta in rerank_with_context().
 """
 
 import os
@@ -31,7 +19,7 @@ from dotenv import load_dotenv
 from sklearn.cluster import KMeans
 from sklearn.metrics.pairwise import cosine_similarity
 
-from db_utils import read_df  # Postgres -> DataFrame helper
+from db_utils import read_df, write_ranked_recommendations  # db helper functions we wrote
 
 load_dotenv()
 
@@ -39,9 +27,7 @@ SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
 SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
 SPOTIFY_REFRESH_TOKEN = os.getenv("SPOTIFY_REFRESH_TOKEN")
 
-# -----------------------------
-# Audio features used to describe how a song sounds
-# -----------------------------
+# audio features we use to describe how a song sounds
 AUDIO_FEATURE_COLS = [
     "acousticness",
     "danceability",
@@ -55,9 +41,7 @@ AUDIO_FEATURE_COLS = [
 ]
 
 
-# ============================================================
-# 1) SPOTIFY USER HELPERS
-# ============================================================
+# --- spotify auth helpers ---
 
 def get_spotify_access_token():
     if not all([SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET, SPOTIFY_REFRESH_TOKEN]):
@@ -96,22 +80,23 @@ def get_current_spotify_user():
 
 
 def get_current_user_hash():
+    # check if a user hash was already injected (happens when streamlit calls this as a subprocess)
+    injected = os.getenv("SPOTIFY_USER_HASH")
+    if injected:
+        print(f"Using injected SPOTIFY_USER_HASH: {injected}")
+        return injected
     user = get_current_spotify_user()
     spotify_user_id = user["id"]
     print(f"Using Spotify user id in cluster.py: {spotify_user_id}")
     return spotify_user_id
 
 
-# ============================================================
-# 2) DB LOADERS
-# ============================================================
+# --- db loading functions ---
 
 def load_user_profile_from_db(user_hash: str, time_range: str = "long_term") -> pd.DataFrame:
     """
-    Loads the CURRENT user's profile tracks + audio features from Postgres.
-
-    Source tables:
-      users -> user_top_tracks -> tracks -> audio_features
+    Pull the user's top tracks and audio features from postgres.
+    Joins users -> user_top_tracks -> tracks -> audio_features tables.
     """
     sql = f"""
     SELECT
@@ -146,10 +131,8 @@ def load_user_profile_from_db(user_hash: str, time_range: str = "long_term") -> 
 
 def load_candidates_from_db(user_hash: str, limit: int = 500) -> pd.DataFrame:
     """
-    Loads candidate tracks for the CURRENT user from Postgres.
-
-    Source tables:
-      users -> catalog_tracks -> tracks -> audio_features
+    Pull candidate tracks for this user from the catalog_tracks table.
+    These are the songs we'll actually score and recommend.
     """
     sql = f"""
     SELECT
@@ -185,9 +168,34 @@ def load_candidates_from_db(user_hash: str, limit: int = 500) -> pd.DataFrame:
     return read_df(sql)
 
 
-# ============================================================
-# 3) DATA VALIDATION / CLEANING
-# ============================================================
+def load_latest_weather_context() -> dict:
+    """
+    Grab the most recent weather entry from the context_inputs table.
+    Returns an empty dict if nothing is in there yet.
+    """
+    sql = """
+        SELECT temperature_c, relative_humidity, wind_speed_m_s, text_description
+        FROM context_inputs
+        ORDER BY fetched_at DESC
+        LIMIT 1;
+    """
+    try:
+        df = read_df(sql)
+        if df.empty:
+            return {}
+        row = df.iloc[0]
+        return {
+            "temperature_c": row.get("temperature_c"),
+            "relative_humidity": row.get("relative_humidity"),
+            "wind_speed_m_s": row.get("wind_speed_m_s"),
+            "text_description": str(row.get("text_description") or "").lower(),
+        }
+    except Exception as e:
+        print(f"WARNING: Could not load weather context: {e}")
+        return {}
+
+
+# --- data cleaning helpers ---
 
 def validate_audio_cols(df: pd.DataFrame) -> None:
     missing = [c for c in AUDIO_FEATURE_COLS if c not in df.columns]
@@ -202,18 +210,12 @@ def coerce_numeric_audio(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# ============================================================
-# 4) CLUSTERING (AUDIO ONLY)
-# ============================================================
+# --- clustering functions ---
 
 def cluster_tracks_by_audio(df: pd.DataFrame, n_clusters: int = 4, cluster_col: str = "audio_cluster"):
     """
-    Run KMeans clustering on AUDIO_FEATURE_COLS.
-
-    Returns:
-      clustered_df: df + cluster assignments
-      centroids_df: per-cluster average feature vector
-      kmeans model
+    Run KMeans on the audio feature columns to group similar songs together.
+    Returns the clustered df, a centroids df, and the kmeans model.
     """
     df = df.copy()
     validate_audio_cols(df)
@@ -243,11 +245,8 @@ def cluster_tracks_by_audio(df: pd.DataFrame, n_clusters: int = 4, cluster_col: 
 
 def assign_candidates_to_centroids(candidates_df: pd.DataFrame, centroids_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Assign each candidate track to the most similar centroid using cosine similarity.
-
-    Output columns added:
-      assigned_cluster_id
-      cluster_similarity
+    For each candidate track, find which cluster centroid it's most similar to.
+    Uses cosine similarity. Adds assigned_cluster_id and cluster_similarity columns.
     """
     candidates_df = candidates_df.copy()
     centroids_df = centroids_df.copy()
@@ -276,27 +275,65 @@ def assign_candidates_to_centroids(candidates_df: pd.DataFrame, centroids_df: pd
     return cand_clean
 
 
-# ============================================================
-# 5) (FUTURE) CONTEXT SUPPORT: WEATHER + SURVEY
-# ============================================================
+# --- weather context scoring ---
 
 def context_fit_score(row: pd.Series, context: dict) -> float:
     """
-    FUTURE: Convert mood/weather context into a score for how well a track fits.
-    For now: returns 0.0 (no effect).
+    Score how well a track fits the current weather.
+    We basically made rules like:
+      - cold/cloudy weather -> upbeat high energy songs
+      - rainy/stormy -> calm acoustic tracks
+      - hot -> danceable stuff
+      - windy -> high energy
+    Returns a float between 0 and 1.
     """
-    return 0.0
+    if not context:
+        return 0.0
+
+    score = 0.0
+    weight_sum = 0.0
+
+    temp = context.get("temperature_c")
+    desc = context.get("text_description", "")
+    wind = context.get("wind_speed_m_s")
+
+    energy     = float(row.get("energy",     0.5) or 0.5)
+    valence    = float(row.get("valence",    0.5) or 0.5)
+    dance      = float(row.get("danceability", 0.5) or 0.5)
+    acoustic   = float(row.get("acousticness", 0.5) or 0.5)
+
+    # cold or foggy outside = uplifting tracks feel better
+    if (temp is not None and temp < 10) or any(w in desc for w in ["fog", "cloud", "overcast", "mist"]):
+        score += (energy + valence) / 2
+        weight_sum += 1.0
+
+    # rainy/stormy = more chill acoustic vibes
+    if any(w in desc for w in ["rain", "storm", "thunder", "drizzle", "shower"]):
+        score += (acoustic + (1 - energy)) / 2
+        weight_sum += 1.0
+
+    # hot weather = danceable upbeat stuff
+    if temp is not None and temp > 25:
+        score += (dance + valence) / 2
+        weight_sum += 1.0
+
+    # windy = high energy tracks
+    if wind is not None and wind > 10:
+        score += energy
+        weight_sum += 1.0
+
+    if weight_sum == 0:
+        return 0.5  # neutral: no strong weather signal, give mid score
+
+    return score / weight_sum
 
 
 def rerank_with_context(assigned_df: pd.DataFrame, context: dict, alpha: float = 1.0, beta: float = 0.0) -> pd.DataFrame:
     """
-    Combine similarity score with optional context-based score.
-
+    Combine the cluster similarity score with the weather context score.
     final_score = alpha * cluster_similarity + beta * context_fit_score
-
-    Important:
-    - Sort highest score first
-    - Keep only the best-scoring row per spotify_track_id
+    alpha=1, beta=0 means ignore weather and just use audio similarity.
+    Deduplicates by track id and sorts best first.
     """
     df = assigned_df.copy()
 
@@ -315,18 +352,12 @@ def rerank_with_context(assigned_df: pd.DataFrame, context: dict, alpha: float =
     return df
 
 
-# ============================================================
-# MAIN
-# ============================================================
+# --- main ---
 
 if __name__ == "__main__":
-    """
-    Default behavior: DB + audio-only + CURRENT USER.
-    """
-
     user_hash = get_current_user_hash()
 
-    # 1) Load current user's profile from DB
+    # step 1: load the user's top tracks from db
     profile_df = load_user_profile_from_db(user_hash=user_hash, time_range="long_term")
     print("Loaded profile rows from Postgres:", len(profile_df))
     if profile_df.empty:
@@ -335,7 +366,7 @@ if __name__ == "__main__":
             "Run ingest_spotify_top_tracks.py and enrich_audio_features first."
         )
 
-    # 2) Cluster current user's profile tracks
+    # step 2: cluster those tracks by audio features
     clustered_profile_df, centroids_df, _kmeans = cluster_tracks_by_audio(
         profile_df,
         n_clusters=4,
@@ -344,22 +375,36 @@ if __name__ == "__main__":
     print("Cluster counts:")
     print(clustered_profile_df["audio_cluster"].value_counts().sort_index())
 
-    # 3) Load current user's candidates; if empty, reuse profile for demo
+    # step 3: load candidate tracks (if empty, just use profile tracks for testing)
     candidates_df = load_candidates_from_db(user_hash=user_hash, limit=500)
     if len(candidates_df) == 0:
         print("catalog_tracks is empty for this user. Using profile tracks as demo candidates.")
         candidates_df = profile_df.copy()
 
-    # 4) Assign candidates to closest centroid
+    # step 4: assign each candidate to the nearest centroid
     assigned_candidates_df = assign_candidates_to_centroids(candidates_df, centroids_df)
     print("Assigned candidates rows:", len(assigned_candidates_df))
     print(assigned_candidates_df.head())
 
-    # 5) (Future) rerank with context
-    context = {}  # later: load latest survey+weather from DB (context_inputs)
-    final_df = rerank_with_context(assigned_candidates_df, context=context, alpha=1.0, beta=0.0)
+    # step 5: rerank using weather context if available
+    # set APPLY_WEATHER=false to skip weather and use pure audio similarity
+    apply_weather = os.getenv("APPLY_WEATHER", "true").lower() != "false"
+    context = {}
+    if apply_weather:
+        context = load_latest_weather_context()
+        if context:
+            print(f"Weather context loaded: {context.get('text_description')}, "
+                  f"{context.get('temperature_c')}°C")
+        else:
+            print("No weather context found — using audio-only ranking.")
 
-    # 6) Save outputs for inspection/demo (per-user filenames)
+    # if we have weather context blend it in (30% weather, 70% audio similarity)
+    # otherwise just use audio similarity alone
+    alpha = 0.7 if context else 1.0
+    beta  = 0.3 if context else 0.0
+    final_df = rerank_with_context(assigned_candidates_df, context=context, alpha=alpha, beta=beta)
+
+    # step 6: save outputs to data/ so we can inspect them
     os.makedirs("data", exist_ok=True)
 
     safe_user = user_hash.replace("/", "_")
@@ -380,5 +425,15 @@ if __name__ == "__main__":
     print(f"- {assigned_out}")
     print(f"- {ranked_out}")
 
-    print("\nNext (later): Add weather/survey by creating a context_inputs table + Streamlit UI,")
-    print("then set beta>0 in rerank_with_context() to activate context-based ranking.")
+    # step 7: write the final ranked list to postgres so the frontend can read it
+    # look up the internal user_id for this user hash first
+    user_row = read_df(f"SELECT user_id FROM users WHERE spotify_user_hash = '{user_hash}' LIMIT 1")
+    if user_row.empty:
+        print("WARNING: user not found in users table — skipping DB write for ranked_recommendations.")
+    else:
+        db_user_id = int(user_row.iloc[0]["user_id"])
+        n_written = write_ranked_recommendations(user_id=db_user_id, final_df=final_df)
+        print(f"\n✅ Wrote {n_written} rows to ranked_recommendations (user_id={db_user_id})")
+
+    print("\nDone! To use weather/survey influence, make sure context_inputs has recent data")
+    print("and adjust beta in rerank_with_context() above 0.")

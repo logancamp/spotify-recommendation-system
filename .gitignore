@@ -1,7 +1,13 @@
 .env
+.env*
 __pycache__/
 *.pyc
 data/
 logs/
 .DS_Store
-.env*
+.cache
+*.cache
+*.pem
+*.key
+*.token
+pipeline/spotify_pipeline/data/

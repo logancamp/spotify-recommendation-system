@@ -10,7 +10,7 @@ A fully automated, end-to-end music recommendation pipeline that ingests your Sp
 2. **Enrich** — fetches audio features (energy, valence, danceability, etc.) for every track via the ReccoBeats API
 3. **Build candidates** — searches Spotify for tracks from your top artists/genres that you haven't heard
 4. **Cluster** — runs KMeans on your listening history to find your audio "taste clusters", then scores candidates by cosine similarity to those centroids
-5. **Weather reranking** — optionally blends in a weather context score (rainy → acoustic, hot → danceable, etc.)
+5. **Weather reranking** — fetches real weather for the user's city (entered on the loading page) and blends it into the score (rainy → acoustic, hot → danceable, etc.)
 6. **Survey reranking** — in the web app, you pick mood preferences (Happy, Acoustic, High Energy, etc.) which rerank the results on the fly
 7. **Save** — one click saves the final playlist directly to your Spotify account
 
@@ -155,7 +155,7 @@ conda run -n airflow_env airflow dags trigger spotify_playlist_pipeline
 | Page | What it does |
 |---|---|
 | **Login** | Spotify OAuth — authorizes the app to read your top tracks and create playlists |
-| **Loading** | Checks if recommendations are < 12 hours old; if fresh skips the pipeline, otherwise runs all 5 steps with a live progress UI |
+| **Loading** | Checks if recommendations are < 12 hours old; if fresh skips the pipeline. Otherwise shows a city input field and a "Build my recommendations" button — the city is used to fetch local weather before clustering | 
 | **Survey** | Pick mood preferences (want/don't want), temperature slider, number of songs, playlist name, weather toggle |
 | **Playlist** | Shows the reranked songs, a radar chart of audio features for any selected track, and a Save to Spotify button |
 
@@ -171,7 +171,7 @@ conda run -n airflow_env airflow dags trigger spotify_playlist_pipeline
 | `catalog_tracks` | Candidate tracks per user (built from artist/genre searches) |
 | `audio_features` | ReccoBeats audio features for every track |
 | `ranked_recommendations` | Final scored + ranked output of `cluster.py` per user |
-| `context_inputs` | Recent weather observations from NOAA NWS |
+| `context_inputs` | Weather observations written by `collect_weather_today.py` (per user's city) |
 
 ---
 

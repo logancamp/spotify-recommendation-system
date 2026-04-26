@@ -44,7 +44,7 @@ def _run_step(label: str, cmd: str, cwd: str, extra_env: dict) -> dict:
     }
 
 
-def run_for_user(access_token: str, user_hash: str, skip_candidates: bool = False) -> list[dict]:
+def run_for_user(access_token: str, user_hash: str, skip_candidates: bool = False, city: str = "") -> list[dict]:
     """
     Run all the pipeline steps for a given user.
     Each step is a subprocess that gets the user's access token injected as an env var.
@@ -54,15 +54,19 @@ def run_for_user(access_token: str, user_hash: str, skip_candidates: bool = Fals
       2. Enrich those tracks with audio features
       3. Build the candidate pool (search for similar tracks)
       4. Enrich candidate tracks with audio features
-      5. Cluster + rank candidates -> saves to ranked_recommendations
+      5. Fetch today's weather (uses city if provided, otherwise IP geolocation)
+      6. Cluster + rank candidates -> saves to ranked_recommendations
 
     skip_candidates=True lets you skip steps 3 & 4 if the candidates are already there.
+    city is the user's city string (e.g. "Cleveland, OH") for weather context.
     Returns a list of result dicts with step, success, stdout, stderr, returncode.
     """
     extra = {
         "SPOTIFY_ACCESS_TOKEN": access_token,
         "SPOTIFY_USER_HASH": user_hash,
     }
+    if city:
+        extra["WEATHER_CITY"] = city
 
     steps = [
         (
@@ -90,6 +94,14 @@ def run_for_user(access_token: str, user_hash: str, skip_candidates: bool = Fals
                 PIPELINE_DIR,
             ),
         ]
+
+    steps.append(
+        (
+            "Fetch weather",
+            f"{PYTHON} data-collect/collect_weather_today.py",
+            REPO_ROOT,
+        )
+    )
 
     steps.append(
         (

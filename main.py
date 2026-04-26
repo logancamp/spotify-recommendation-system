@@ -52,8 +52,8 @@ def show_login():
 
 def show_loading():
     display_name = st.session_state.get("display_name", "there")
-    st.markdown(f"### Welcome, {display_name}! Building your recommendations...")
-    st.caption("This runs once per login and takes about 1–2 minutes.")
+    st.markdown(f"### Welcome, {display_name}! Let's build your recommendations.")
+    st.caption("This runs once and takes about 1–2 minutes.")
 
     token_info = st.session_state.get("token_info")
     user_hash  = st.session_state.get("spotify_user_hash")
@@ -94,8 +94,22 @@ def show_loading():
     except Exception:
         pass  # If check fails, just run the pipeline
 
+    # ask for city before running so weather context is accurate
+    with st.container(border=True):
+        st.markdown("**Your city** (for weather-based recommendations)")
+        st.caption("We use this to fetch local weather and tune your playlist. Leave blank to use the server's location.")
+        city = st.text_input(
+            label="City",
+            placeholder="e.g. Cleveland, OH  or  Miami, FL",
+            key="loading_city",
+            label_visibility="collapsed",
+        )
+
+    if not st.button("Build my recommendations →", type="primary", use_container_width=True):
+        return
+
     with st.status("Running pipeline...", expanded=True) as status_box:
-        results = run_for_user(access_token, user_hash)
+        results = run_for_user(access_token, user_hash, city=city.strip())
 
         for r in results:
             icon = "✅" if r["success"] else "❌"

@@ -15,7 +15,6 @@ import sys
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 PIPELINE_DIR = os.path.join(REPO_ROOT, "pipeline", "spotify_pipeline")
 
-# use the same python that's running this script so we don't have env issues
 PYTHON = sys.executable
 
 
@@ -44,23 +43,27 @@ def _run_step(label: str, cmd: str, cwd: str, extra_env: dict) -> dict:
     }
 
 
+def _create_run_id(user_hash: str) -> str | None:
+    """
+    Create a pipeline_runs row early so all steps can be stamped with the same run_id.
+    Returns the run_id as a string for injection into subprocesses, or None on failure.
+    """
+    try:
+        sys.path.insert(0, REPO_ROOT)
+        from db_utils import read_df, create_pipeline_run
+        user_row = read_df(f"SELECT user_id FROM users WHERE spotify_user_hash = '{user_hash}' LIMIT 1")
+        if user_row.empty:
+            return None
+        user_id = int(user_row.iloc[0]["user_id"])
+        run_id = create_pipeline_run(user_id=user_id)
+        print(f"[pipeline_runner] Created pipeline run id={run_id}")
+        return str(run_id)
+    except Exception as e:
+        print(f"[pipeline_runner] WARNING: could not create pipeline run: {e}")
+        return None
+
+
 def run_for_user(access_token: str, user_hash: str, skip_candidates: bool = False, city: str = "") -> list[dict]:
-    """
-    Run all the pipeline steps for a given user.
-    Each step is a subprocess that gets the user's access token injected as an env var.
-
-    Steps:
-      1. Ingest top tracks from Spotify into the DB
-      2. Enrich those tracks with audio features
-      3. Build the candidate pool (search for similar tracks)
-      4. Enrich candidate tracks with audio features
-      5. Fetch today's weather (uses city if provided, otherwise IP geolocation)
-      6. Cluster + rank candidates -> saves to ranked_recommendations
-
-    skip_candidates=True lets you skip steps 3 & 4 if the candidates are already there.
-    city is the user's city string (e.g. "Cleveland, OH") for weather context.
-    Returns a list of result dicts with step, success, stdout, stderr, returncode.
-    """
     extra = {
         "SPOTIFY_ACCESS_TOKEN": access_token,
         "SPOTIFY_USER_HASH": user_hash,
@@ -68,10 +71,20 @@ def run_for_user(access_token: str, user_hash: str, skip_candidates: bool = Fals
     if city:
         extra["WEATHER_CITY"] = city
 
+    # create the run record upfront so catalog + recommendation rows are all stamped with it
+    run_id = _create_run_id(user_hash)
+    if run_id:
+        extra["PIPELINE_RUN_ID"] = run_id
+
     steps = [
         (
             "Ingest top tracks",
             f"{PYTHON} scripts/ingest_spotify_top_tracks.py",
+            PIPELINE_DIR,
+        ),
+        (
+            "Ingest recently played",
+            f"{PYTHON} scripts/ingest_recently_played.py",
             PIPELINE_DIR,
         ),
         (
@@ -116,7 +129,6 @@ def run_for_user(access_token: str, user_hash: str, skip_candidates: bool = Fals
         r = _run_step(label, cmd, cwd, extra)
         results.append(r)
         if not r["success"]:
-            # stop early - later steps depend on earlier ones working
             break
 
     return results

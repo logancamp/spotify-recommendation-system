@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS catalog_tracks (
   query_used TEXT,
   seed_type TEXT,
   seed_value TEXT,
+  pipeline_run_id BIGINT REFERENCES pipeline_runs(id) ON DELETE SET NULL,
 
   pulled_at TIMESTAMPTZ DEFAULT NOW(),
   raw_json JSONB,
@@ -86,6 +87,20 @@ CREATE INDEX IF NOT EXISTS idx_tracks_isrc
 CREATE INDEX IF NOT EXISTS idx_audio_features_recc_uuid
   ON audio_features(reccobeats_track_uuid);
 
+-- Pipeline run log. One row per user per pipeline execution.
+-- Used to distinguish "new this run" vs "already in catalog" and to track run history.
+CREATE TABLE IF NOT EXISTS pipeline_runs (
+  id BIGSERIAL PRIMARY KEY,
+  user_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE,
+  started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  completed_at TIMESTAMPTZ,
+  catalog_tracks_added INTEGER DEFAULT 0,
+  recommendations_written INTEGER DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_pipeline_runs_user
+  ON pipeline_runs (user_id, started_at DESC);
+
 -- Ranked recommendations written by cluster.py after each pipeline run.
 -- One row per (user, track). Re-running cluster.py for a user replaces that user's rows.
 CREATE TABLE IF NOT EXISTS ranked_recommendations (
@@ -95,7 +110,10 @@ CREATE TABLE IF NOT EXISTS ranked_recommendations (
   name TEXT,
   primary_artist TEXT,
   final_score DOUBLE PRECISION NOT NULL,
+  cluster_similarity DOUBLE PRECISION,
+  context_score DOUBLE PRECISION,
   rank_position INTEGER NOT NULL,
+  pipeline_run_id BIGINT REFERENCES pipeline_runs(id) ON DELETE SET NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (user_id, spotify_track_id)
 );
@@ -119,3 +137,37 @@ CREATE TABLE IF NOT EXISTS context_inputs (
 
 CREATE INDEX IF NOT EXISTS idx_context_inputs_fetched_at
   ON context_inputs (fetched_at DESC);
+
+-- Recently played tracks per user (timestamped, cumulative — never upserted away).
+-- Sourced from Spotify /v1/me/player/recently-played (last 50 per pull).
+CREATE TABLE IF NOT EXISTS user_recently_played (
+  id BIGSERIAL PRIMARY KEY,
+  user_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE,
+  spotify_track_id TEXT REFERENCES tracks(spotify_track_id) ON DELETE CASCADE,
+  played_at TIMESTAMPTZ NOT NULL,
+  pulled_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (user_id, spotify_track_id, played_at)
+);
+
+CREATE INDEX IF NOT EXISTS idx_recently_played_user_time
+  ON user_recently_played (user_id, played_at DESC);
+
+-- Point-in-time snapshots of a user's top-track rankings.
+-- Unlike user_top_tracks (which is an upsert/current-view), this table
+-- accumulates one row per (user, track, time_range, snapshot_date) so we
+-- can chart how taste drifts over weeks / months.
+CREATE TABLE IF NOT EXISTS user_top_track_snapshots (
+  id BIGSERIAL PRIMARY KEY,
+  user_id INTEGER REFERENCES users(user_id) ON DELETE CASCADE,
+  spotify_track_id TEXT REFERENCES tracks(spotify_track_id) ON DELETE CASCADE,
+  time_range TEXT CHECK (time_range IN ('short_term','medium_term','long_term')),
+  rank INTEGER NOT NULL,
+  snapshot_date DATE NOT NULL DEFAULT CURRENT_DATE,
+  pulled_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_snapshots_unique
+  ON user_top_track_snapshots (user_id, spotify_track_id, time_range, snapshot_date);
+
+CREATE INDEX IF NOT EXISTS idx_snapshots_user_date
+  ON user_top_track_snapshots (user_id, snapshot_date DESC);

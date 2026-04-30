@@ -153,7 +153,7 @@ def upsert_track(conn, track):
     )
 
 
-def insert_catalog_track(conn, user_id, spotify_track_id, source, query_used, seed_type, seed_value, raw_json):
+def insert_catalog_track(conn, user_id, spotify_track_id, source, query_used, seed_type, seed_value, raw_json, pipeline_run_id=None):
     conn.execute(
         text("""
             INSERT INTO catalog_tracks (
@@ -163,6 +163,7 @@ def insert_catalog_track(conn, user_id, spotify_track_id, source, query_used, se
                 query_used,
                 seed_type,
                 seed_value,
+                pipeline_run_id,
                 pulled_at,
                 raw_json
             )
@@ -173,11 +174,12 @@ def insert_catalog_track(conn, user_id, spotify_track_id, source, query_used, se
                 :query_used,
                 :seed_type,
                 :seed_value,
+                :pipeline_run_id,
                 NOW(),
                 CAST(:raw_json AS jsonb)
             )
             ON CONFLICT (user_id, spotify_track_id, seed_type, seed_value)
-            DO NOTHING
+            DO UPDATE SET pipeline_run_id = EXCLUDED.pipeline_run_id, pulled_at = NOW()
         """),
         {
             "user_id": user_id,
@@ -186,6 +188,7 @@ def insert_catalog_track(conn, user_id, spotify_track_id, source, query_used, se
             "query_used": query_used,
             "seed_type": seed_type,
             "seed_value": seed_value,
+            "pipeline_run_id": pipeline_run_id,
             "raw_json": json.dumps(raw_json),
         }
     )
@@ -208,9 +211,12 @@ def save_raw_search_result(query, data):
 
 def derive_search_seeds_from_profile(conn, user_id: int, limit=10):
     """
-    Build candidate-search seeds from the current user's actual profile.
-    For now, use top artist names from long_term tracks.
+    Build candidate-search seeds from the current user's profile.
+    Uses top artists from long_term top tracks PLUS distinct artists from the
+    last 7 days of recently played history, so the catalog stays fresh even when
+    a user's "long_term" top tracks haven't changed much.
     """
+    # --- long-term top artists ---
     rows = conn.execute(
         text("""
             SELECT
@@ -229,14 +235,34 @@ def derive_search_seeds_from_profile(conn, user_id: int, limit=10):
         {"user_id": user_id, "limit": limit}
     ).fetchall()
 
+    seen_artists = set()
     seeds = []
     for r in rows:
         artist = r[0]
-        seeds.append({
-            "seed_type": "artist",
-            "seed_value": artist,
-            "query_used": artist
-        })
+        if artist and artist not in seen_artists:
+            seen_artists.add(artist)
+            seeds.append({"seed_type": "artist", "seed_value": artist, "query_used": artist})
+
+    # --- recently played artists (last 7 days, up to limit/2 extra) ---
+    recent_rows = conn.execute(
+        text("""
+            SELECT DISTINCT t.primary_artist
+            FROM user_recently_played rp
+            JOIN tracks t ON t.spotify_track_id = rp.spotify_track_id
+            WHERE rp.user_id = :user_id
+              AND rp.played_at >= NOW() - INTERVAL '7 days'
+              AND t.primary_artist IS NOT NULL
+            ORDER BY t.primary_artist
+            LIMIT :limit
+        """),
+        {"user_id": user_id, "limit": max(1, limit // 2)}
+    ).fetchall()
+
+    for r in recent_rows:
+        artist = r[0]
+        if artist and artist not in seen_artists:
+            seen_artists.add(artist)
+            seeds.append({"seed_type": "artist_recent", "seed_value": artist, "query_used": artist})
 
     return seeds
 
@@ -248,7 +274,13 @@ def main():
     current_user = get_current_spotify_user(access_token)
     spotify_user_id = current_user["id"]
 
+    # cluster.py creates the run_id and injects it so all steps are stamped consistently
+    run_id_raw = os.getenv("PIPELINE_RUN_ID")
+    pipeline_run_id = int(run_id_raw) if run_id_raw else None
+
     print(f"Using Spotify user id for candidate pool: {spotify_user_id}")
+    if pipeline_run_id:
+        print(f"Stamping catalog tracks with pipeline_run_id={pipeline_run_id}")
 
     with engine.begin() as conn:
         user_id = ensure_user(conn, spotify_user_hash=spotify_user_id)
@@ -282,7 +314,8 @@ def main():
                     query_used=seed["query_used"],
                     seed_type=seed["seed_type"],
                     seed_value=seed["seed_value"],
-                    raw_json=track
+                    raw_json=track,
+                    pipeline_run_id=pipeline_run_id,
                 )
                 total_attempted += 1
 

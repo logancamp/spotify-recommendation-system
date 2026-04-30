@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 from sklearn.cluster import KMeans
 from sklearn.metrics.pairwise import cosine_similarity
 
-from db_utils import read_df, write_ranked_recommendations  # db helper functions we wrote
+from db_utils import read_df, write_ranked_recommendations, create_pipeline_run, complete_pipeline_run  # db helper functions we wrote
 
 load_dotenv()
 
@@ -404,6 +404,11 @@ if __name__ == "__main__":
     beta  = 0.3 if context else 0.0
     final_df = rerank_with_context(assigned_candidates_df, context=context, alpha=alpha, beta=beta)
 
+    # keep the raw cluster_similarity score separate so the UI can reapply weather
+    # client-side without being locked into the pipeline's alpha/beta choice
+    if "cluster_similarity" not in final_df.columns:
+        final_df["cluster_similarity"] = final_df["final_score"]
+
     # step 6: save outputs to data/ so we can inspect them
     os.makedirs("data", exist_ok=True)
 
@@ -426,14 +431,21 @@ if __name__ == "__main__":
     print(f"- {ranked_out}")
 
     # step 7: write the final ranked list to postgres so the frontend can read it
-    # look up the internal user_id for this user hash first
     user_row = read_df(f"SELECT user_id FROM users WHERE spotify_user_hash = '{user_hash}' LIMIT 1")
     if user_row.empty:
         print("WARNING: user not found in users table — skipping DB write for ranked_recommendations.")
     else:
         db_user_id = int(user_row.iloc[0]["user_id"])
-        n_written = write_ranked_recommendations(user_id=db_user_id, final_df=final_df)
+
+        # create a pipeline run record so the UI can track history and detect new catalog tracks
+        run_id = create_pipeline_run(user_id=db_user_id)
+        print(f"Created pipeline run id={run_id}")
+
+        n_written = write_ranked_recommendations(user_id=db_user_id, final_df=final_df, run_id=run_id)
         print(f"\n✅ Wrote {n_written} rows to ranked_recommendations (user_id={db_user_id})")
+
+        complete_pipeline_run(run_id=run_id, catalog_added=len(candidates_df), recs_written=n_written)
+        print(f"✅ Completed pipeline run id={run_id}")
 
     print("\nDone! To use weather/survey influence, make sure context_inputs has recent data")
     print("and adjust beta in rerank_with_context() above 0.")

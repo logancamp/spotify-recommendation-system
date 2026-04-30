@@ -329,10 +329,16 @@ def show_playlist():
             af.acousticness  AS recommended_acousticness,
             af.instrumentalness AS recommended_instrumentalness,
             af.liveness      AS recommended_liveness,
-            af.speechiness   AS recommended_speechiness
+            af.speechiness   AS recommended_speechiness,
+            af.tempo,
+            af.loudness,
+            t.popularity,
+            t.duration_ms,
+            t.explicit
         FROM ranked_recommendations rr
         JOIN users u ON u.user_id = rr.user_id
         JOIN audio_features af ON af.spotify_track_id = rr.spotify_track_id
+        JOIN tracks t ON t.spotify_track_id = rr.spotify_track_id
         WHERE u.spotify_user_hash = '{user_hash}'
         ORDER BY rr.rank_position
         LIMIT 120;
@@ -393,22 +399,6 @@ def show_playlist():
     num_songs = st.session_state.get("survey_num_songs", 15)
     df = df.head(num_songs).reset_index(drop=True)
 
-    # only show the weather banner if the user toggled it on in the survey
-    if st.session_state.get("apply_weather", False):
-        try:
-            weather_df = read_df(
-                "SELECT temperature_c, text_description FROM context_inputs ORDER BY fetched_at DESC LIMIT 1;"
-            )
-            if not weather_df.empty:
-                wr = weather_df.iloc[0]
-                temp = wr["temperature_c"]
-                desc = wr["text_description"] or ""
-                st.info(f"🌡️ Weather-influenced ranking: **{desc}**, **{temp}°C**")
-        except Exception:
-            pass
-    else:
-        st.info("🎵 Audio-only ranking applied (weather influence off)")
-
     feature_cols = {
         "recommended_danceability": "Danceability",
         "recommended_energy": "Energy",
@@ -419,18 +409,16 @@ def show_playlist():
         "recommended_speechiness": "Speechiness",
     }
 
-    # normalize features to 0-1 so the radar chart doesn't look weird
+    # normalized copy used only for the radar chart
+    radar_df = df.copy()
     for col in feature_cols:
-        col_min = df[col].min()
-        col_max = df[col].max()
+        col_min = radar_df[col].min()
+        col_max = radar_df[col].max()
         if col_max > col_min:
-            df[col] = (df[col] - col_min) / (col_max - col_min)
+            radar_df[col] = (radar_df[col] - col_min) / (col_max - col_min)
         else:
-            df[col] = 0.5
+            radar_df[col] = 0.5
 
-    st.markdown("### Your Mood Playlist!")
-
-    # some css styling to make the song list look nicer
     st.markdown("""
     <style>
     .song-row {
@@ -441,43 +429,41 @@ def show_playlist():
         align-items: center;
         gap: 12px;
     }
-    .song-row-even {
-        background-color: rgba(255, 255, 255, 0.03);
+    .song-row-even { background-color: rgba(255,255,255,0.03); }
+    .song-row-odd  { background-color: rgba(255,255,255,0.08); }
+    .song-row:hover { background-color: rgba(29,185,84,0.15); }
+    .song-number { color: #888; font-size: 14px; min-width: 24px; text-align: right; }
+    .song-title  { font-weight: 600; font-size: 15px; }
+    .song-artist { color: #888; font-size: 13px; }
+    .feature-title  { text-align: center; font-size: 18px; font-weight: 600; margin-bottom: 0; }
+    .feature-artist { text-align: center; color: #888; font-size: 14px; margin-top: 2px; }
+    .explicit-tag {
+        background-color: #888; color: #000; font-size: 10px; font-weight: 700;
+        padding: 1px 4px; border-radius: 2px; margin-left: 6px; vertical-align: middle;
     }
-    .song-row-odd {
-        background-color: rgba(255, 255, 255, 0.08);
-    }
-    .song-row:hover {
-        background-color: rgba(29, 185, 84, 0.15);
-    }
-    .song-number {
-        color: #888;
-        font-size: 14px;
-        min-width: 24px;
-        text-align: right;
-    }
-    .song-title {
-        font-weight: 600;
-        font-size: 15px;
-    }
-    .song-artist {
-        color: #888;
-        font-size: 13px;
-    }
-    .feature-title {
-        text-align: center;
-        font-size: 18px;
-        font-weight: 600;
-        margin-bottom: 0;
-    }
-    .feature-artist {
-        text-align: center;
-        color: #888;
-        font-size: 14px;
-        margin-top: 2px;
-    }
+    .song-duration { color: #888; font-size: 12px; margin-left: 8px; }
+    .playlist-header { font-size: 26px; font-weight: 700; margin-bottom: 4px; }
+    .playlist-sub { color: #888; font-size: 14px; margin-bottom: 16px; }
     </style>
     """, unsafe_allow_html=True)
+
+    # weather banner
+    if st.session_state.get("apply_weather", False):
+        try:
+            weather_df = read_df(
+                "SELECT temperature_c, text_description FROM context_inputs ORDER BY fetched_at DESC LIMIT 1;"
+            )
+            if not weather_df.empty:
+                wr = weather_df.iloc[0]
+                st.info(f"🌡️ Weather-influenced ranking: **{wr['text_description'] or ''}**, **{wr['temperature_c']}°C**")
+        except Exception:
+            pass
+    else:
+        st.info("🎵 Audio-only ranking applied (weather influence off)")
+
+    pname = st.session_state.get("survey_playlist_name", "My Recommended Playlist")
+    st.markdown(f'<p class="playlist-header">{pname}</p>', unsafe_allow_html=True)
+    st.markdown(f'<p class="playlist-sub">{len(df)} tracks</p>', unsafe_allow_html=True)
 
     if "selected_song" not in st.session_state:
         st.session_state.selected_song = None
@@ -490,12 +476,17 @@ def show_playlist():
                 col1, col2 = st.columns([5, 1], vertical_alignment="center")
                 with col1:
                     parity = "song-row-even" if i % 2 == 0 else "song-row-odd"
+                    explicit_tag = '<span class="explicit-tag">E</span>' if row.get("explicit") else ""
+                    duration_ms = int(row.get("duration_ms") or 0)
+                    duration_str = f'{duration_ms // 60000}:{(duration_ms % 60000) // 1000:02d}'
                     st.markdown(
                         f'<div class="song-row {parity}">'
                         f'<span class="song-number">{i + 1}</span>'
-                        f'<div><span class="song-title">{row["recommended_track_name"]}</span><br>'
-                        f'<span class="song-artist">{row["recommended_artist_names"]}</span></div>'
-                        f'</div>',
+                        f'<div>'
+                        f'<span class="song-title">{row["recommended_track_name"]}</span>{explicit_tag}<br>'
+                        f'<span class="song-artist">{row["recommended_artist_names"]}</span>'
+                        f'<span class="song-duration">{duration_str}</span>'
+                        f'</div></div>',
                         unsafe_allow_html=True
                     )
                 with col2:
@@ -504,17 +495,15 @@ def show_playlist():
 
     with right:
         if st.session_state.selected_song is not None:
-            row = df.iloc[st.session_state.selected_song]
+            row = radar_df.iloc[st.session_state.selected_song]
             categories = list(feature_cols.values())
             values = [row[col] for col in feature_cols]
-
             with st.container(border=True, height=550):
                 st.markdown(
                     f'<p class="feature-title">{row["recommended_track_name"]}</p>'
                     f'<p class="feature-artist">{row["recommended_artist_names"]}</p>',
                     unsafe_allow_html=True
                 )
-
                 fig = go.Figure(data=go.Scatterpolar(
                     r=values + [values[0]],
                     theta=categories + [categories[0]],
@@ -540,22 +529,135 @@ def show_playlist():
         else:
             with st.container(border=True, height=550):
                 st.markdown("<br>" * 8, unsafe_allow_html=True)
-                st.markdown("<p style='text-align:center; color:#888; font-size:15px;'>Select a song to view its audio features</p>", unsafe_allow_html=True)
+                st.markdown("<p style='text-align:center;color:#888;font-size:15px;'>Select a song to view its audio features</p>", unsafe_allow_html=True)
 
     st.divider()
-    col_save, col_back = st.columns([1, 1], gap="small")
+    st.markdown("### Playlist Stats")
+
+    chart_df = df.copy()
+    chart_df["label"] = df["recommended_artist_names"] + " — " + df["recommended_track_name"]
+
+    feature_options = {
+        "Danceability": "recommended_danceability",
+        "Energy": "recommended_energy",
+        "Valence": "recommended_valence",
+        "Acousticness": "recommended_acousticness",
+        "Instrumentalness": "recommended_instrumentalness",
+        "Liveness": "recommended_liveness",
+        "Speechiness": "recommended_speechiness",
+        "Tempo": "tempo",
+    }
+
+    ctrl_left, ctrl_right = st.columns([2, 1], gap="large")
+    with ctrl_left:
+        selected_feature = st.selectbox("Feature", options=list(feature_options.keys()), label_visibility="collapsed")
+    with ctrl_right:
+        direction = st.radio("Direction", options=["Highest", "Lowest"], horizontal=True, label_visibility="collapsed")
+
+    highest = direction == "Highest"
+    col = feature_options[selected_feature]
+    deduped = chart_df.sort_values(col, ascending=False).drop_duplicates(subset=["label"]).reset_index(drop=True)
+    top10 = deduped.nlargest(10, col) if highest else deduped.nsmallest(10, col)
+    top10 = top10.sort_values(col, ascending=highest).reset_index(drop=True)
+
+    fig_feat = go.Figure(go.Bar(
+        x=top10[col],
+        y=top10["label"],
+        orientation='h',
+        marker_color='#1DB954'
+    ))
+    fig_feat.update_layout(
+        title=f"Top 10 {'Highest' if highest else 'Lowest'} — {selected_feature}",
+        height=400,
+        margin=dict(l=0, r=20, t=40, b=20),
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        font=dict(color='white'),
+        xaxis=dict(gridcolor='rgba(150,150,150,0.2)', title=selected_feature),
+        yaxis=dict(gridcolor='rgba(0,0,0,0)')
+    )
+    st.plotly_chart(fig_feat, use_container_width=True)
+
+    col_artist, col_pca = st.columns(2, gap="large")
+
+    with col_artist:
+        artist_counts = (
+            chart_df["recommended_artist_names"]
+            .value_counts()
+            .reset_index()
+        )
+        artist_counts.columns = ["artist", "count"]
+        artist_counts = artist_counts.sort_values("count", ascending=False)
+
+        fig_artist = go.Figure(go.Bar(
+            x=artist_counts["artist"],
+            y=artist_counts["count"],
+            marker_color='#1DB954'
+        ))
+        fig_artist.update_layout(
+            title="Most Frequent Artists",
+            height=400,
+            margin=dict(l=20, r=20, t=40, b=100),
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+            font=dict(color='white'),
+            xaxis=dict(gridcolor='rgba(0,0,0,0)', tickangle=-35),
+            yaxis=dict(gridcolor='rgba(150,150,150,0.2)', title="Tracks", dtick=1)
+        )
+        st.plotly_chart(fig_artist, use_container_width=True)
+
+    with col_pca:
+        from sklearn.preprocessing import StandardScaler
+        from sklearn.decomposition import PCA
+
+        pca_features = [
+            "recommended_danceability", "recommended_energy", "recommended_valence",
+            "recommended_acousticness", "recommended_instrumentalness",
+            "recommended_liveness", "recommended_speechiness"
+        ]
+        pca_df = chart_df[pca_features].fillna(0)
+        scaled = StandardScaler().fit_transform(pca_df)
+        coords = PCA(n_components=2).fit_transform(scaled)
+
+        chart_df["pc1"] = coords[:, 0]
+        chart_df["pc2"] = coords[:, 1]
+
+        fig_pca = go.Figure(go.Scatter(
+            x=chart_df["pc1"],
+            y=chart_df["pc2"],
+            mode="markers+text",
+            text=chart_df["recommended_track_name"],
+            textposition="top center",
+            textfont=dict(size=9, color="rgba(255,255,255,0.6)"),
+            marker=dict(size=10, color='#1DB954', opacity=0.85),
+            hovertemplate="<b>%{text}</b><br>%{customdata}<extra></extra>",
+            customdata=chart_df["recommended_artist_names"]
+        ))
+        fig_pca.update_layout(
+            title="Song Similarity Map (PCA)",
+            height=400,
+            margin=dict(l=20, r=20, t=40, b=20),
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+            font=dict(color='white'),
+            xaxis=dict(title="PC1", gridcolor='rgba(150,150,150,0.15)', zeroline=False),
+            yaxis=dict(title="PC2", gridcolor='rgba(150,150,150,0.15)', zeroline=False)
+        )
+        st.plotly_chart(fig_pca, use_container_width=True)
+
+    st.divider()
+    col_save, col_back = st.columns([3, 1], gap="small")
     with col_save:
         if st.button("💚 Save Playlist to Spotify", type="primary", use_container_width=True):
             with st.spinner("Creating playlist on Spotify..."):
                 try:
-                    pname = st.session_state.get("survey_playlist_name", "My Recommended Playlist")
                     playlist_url = save_playlist_to_spotify(df, playlist_name=pname)
                     st.session_state.survey_playlist_name = "My Recommended Playlist"
                     st.success(f"✅ **{pname}** saved! [Open in Spotify]({playlist_url})")
                 except Exception as e:
                     st.error(f"Failed to create playlist: {e}")
     with col_back:
-        if st.button("Back to survey!", use_container_width=True):
+        if st.button("Back to survey", use_container_width=True):
             st.session_state.page_state = "survey"
             st.rerun()
 

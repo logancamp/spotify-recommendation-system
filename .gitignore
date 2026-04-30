@@ -11,3 +11,6 @@ logs/
 *.key
 *.token
 pipeline/spotify_pipeline/data/
+venv/
+.venv/
+.streamlit/

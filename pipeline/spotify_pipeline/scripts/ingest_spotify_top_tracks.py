@@ -30,7 +30,7 @@ DB_PASSWORD = os.getenv("DB_PASSWORD")
 
 required = [
     CLIENT_ID, CLIENT_SECRET, REFRESH_TOKEN,
-    AWS_ACCESS_KEY, AWS_SECRET_KEY, AWS_SESSION_TOKEN, AWS_REGION, S3_BUCKET,
+    AWS_ACCESS_KEY, AWS_SECRET_KEY, AWS_REGION, S3_BUCKET,
     DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD
 ]
 if not all(required):
@@ -83,7 +83,7 @@ def init_s3_client():
     session = boto3.Session(
         aws_access_key_id=AWS_ACCESS_KEY,
         aws_secret_access_key=AWS_SECRET_KEY,
-        aws_session_token=AWS_SESSION_TOKEN,
+        aws_session_token=AWS_SESSION_TOKEN or None,
         region_name=AWS_REGION,
     )
     return session.client("s3")

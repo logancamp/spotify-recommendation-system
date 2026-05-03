@@ -1,2 +1,2 @@
 station_id,observation_time,temperature_c,relative_humidity,wind_speed_m_s,dewpoint_c,visibility_m,text_description,latitude,longitude
-KBKL,2026-04-30T20:25:00+00:00,11,57.795276383181,18.504,3,16093.44,Clear,41.4995,-81.69541
+KBKL,2026-05-03T15:25:00+00:00,13,43.926256823909,,1,16093.44,Clear,41.4995,-81.69541

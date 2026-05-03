@@ -6,15 +6,24 @@ import os
 import sys
 import spotipy # type: ignore
 
-# need this so we can import db_utils no matter where we run the script from
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from db_utils import read_df
 from pipeline_runner import run_for_user, all_succeeded, first_failure
 
+MOOD_THRESHOLDS = {
+    "Happy":         ("valence", "recommended_valence",          ">=", 0.60),
+    "Sad":           ("valence", "recommended_valence",          "<=", 0.40),
+    "High Energy":   ("energy",  "recommended_energy",           ">=", 0.70),
+    "Danceable":     ("danceability", "recommended_danceability", ">=", 0.65),
+    "Acoustic":      ("acousticness", "recommended_acousticness", ">=", 0.50),
+    "Instrumental":  ("instrumentalness", "recommended_instrumentalness", ">=", 0.50),
+    "Live Sounding": ("liveness", "recommended_liveness",        ">=", 0.30),
+    "Speech Heavy":  ("speechiness", "recommended_speechiness",  ">=", 0.10),
+    "High Tempo":    ("tempo",    "recommended_tempo",           ">=", 120),
+}
+
 load_dotenv()
-
 st.set_page_config(layout="wide")
-
 st.title("Spotify Playlist Generator")
 st.text("Generate a playlist based on your mood and favorite songs!")
 st.divider()
@@ -24,7 +33,6 @@ if "page_state" not in st.session_state:
 
 def show_login():
     st.markdown("### Log into spotify!")
-    
     oauth = SpotifyOAuth(
         client_id=os.getenv("SPOTIPY_CLIENT_ID"),
         client_secret=os.getenv("SPOTIPY_CLIENT_SECRET"),
@@ -32,12 +40,9 @@ def show_login():
         scope="user-top-read user-read-recently-played playlist-modify-public playlist-modify-private",
         cache_path=None
     )
-
     auth_url = oauth.get_authorize_url()
     st.markdown(f'<a href="{auth_url}" target="_self"><button>Login with Spotify</button></a>', unsafe_allow_html=True)
-
     code = st.query_params.get("code")
-
     if code:
         token_info = oauth.get_access_token(code, as_dict=True)
         st.session_state.token_info = token_info
@@ -54,19 +59,14 @@ def show_loading():
     display_name = st.session_state.get("display_name", "there")
     st.markdown(f"### Welcome, {display_name}! Let's build your recommendations.")
     st.caption("This runs once and takes about 1–2 minutes.")
-
     token_info = st.session_state.get("token_info")
     user_hash  = st.session_state.get("spotify_user_hash")
-
     if not token_info or not user_hash:
         st.error("Session missing — please log in again.")
         st.session_state.page_state = "login"
         st.rerun()
         return
-
     access_token = token_info["access_token"]
-
-    # skip re-running the whole pipeline if we already have recommendations from the last 12 hours
     try:
         fresh_df = read_df(f"""
             SELECT MAX(rr.created_at) AS last_run
@@ -80,7 +80,7 @@ def show_loading():
             if last_run.tzinfo is None:
                 last_run = last_run.replace(tzinfo=pytz.utc)
             age_hours = (datetime.datetime.now(pytz.utc) - last_run).total_seconds() / 3600
-            if age_hours < 12:  # still fresh, no need to run everything again
+            if age_hours < 12:
                 mins_ago = int(age_hours * 60)
                 st.success(f"✅ Using existing recommendations (last updated {mins_ago} min ago).")
                 if st.button("Continue to survey →", type="primary"):
@@ -92,29 +92,18 @@ def show_loading():
                 st.rerun()
                 return
     except Exception:
-        pass  # If check fails, just run the pipeline
-
-    # ask for city before running so weather context is accurate
+        pass
     with st.container(border=True):
         st.markdown("**Your city** (for weather-based recommendations)")
         st.caption("We use this to fetch local weather and tune your playlist. Leave blank to use the server's location.")
-        city = st.text_input(
-            label="City",
-            placeholder="e.g. Cleveland, OH  or  Miami, FL",
-            key="loading_city",
-            label_visibility="collapsed",
-        )
-
+        city = st.text_input(label="City", placeholder="e.g. Cleveland, OH  or  Miami, FL",
+                             key="loading_city", label_visibility="collapsed")
     if not st.button("Build my recommendations →", type="primary", use_container_width=True):
         return
-
     with st.status("Running pipeline...", expanded=True) as status_box:
         results = run_for_user(access_token, user_hash, city=city.strip())
-
         for r in results:
-            icon = "✅" if r["success"] else "❌"
-            st.write(f"{icon} {r['step']}")
-
+            st.write(f"{'✅' if r['success'] else '❌'} {r['step']}")
         if all_succeeded(results):
             status_box.update(label="✅ Recommendations ready!", state="complete")
             st.session_state.page_state = "survey"
@@ -139,173 +128,83 @@ def show_survey():
     display_name = st.session_state.get("display_name", "there")
     st.markdown(f"### How is your mood today, {display_name}?")
     st.caption("Tell us what you're feeling and we'll build a playlist for you.")
-
-    all_features = [
-        "High Tempo", "Happy", "Sad", "High Energy", "Danceable",
-        "Acoustic", "Instrumental", "Live Sounding", "Speech Heavy"
-    ]
-
+    all_features = ["High Tempo", "Happy", "Sad", "High Energy", "Danceable",
+                    "Acoustic", "Instrumental", "Live Sounding", "Speech Heavy"]
     feature_to_attr = {
-        "High Tempo": "high_tempo",
-        "Happy": "happy",
-        "Sad": "sad",
-        "High Energy": "high_energy",
-        "Danceable": "danceable",
-        "Acoustic": "acoustic",
-        "Instrumental": "instrumental",
-        "Live Sounding": "live_sounding",
-        "Speech Heavy": "speech_heavy",
+        "High Tempo": "high_tempo", "Happy": "happy", "Sad": "sad",
+        "High Energy": "high_energy", "Danceable": "danceable", "Acoustic": "acoustic",
+        "Instrumental": "instrumental", "Live Sounding": "live_sounding", "Speech Heavy": "speech_heavy",
     }
-
     with st.container(border=True):
         st.markdown("**I want my playlist to be:**")
-        want = st.multiselect(
-            label="I want",
-            options=all_features,
-            default=[],
-            placeholder="Pick features you want...",
-            label_visibility="collapsed"
-        )
-
+        want = st.multiselect(label="I want", options=all_features, default=[],
+                              placeholder="Pick features you want...", label_visibility="collapsed")
     with st.container(border=True):
         st.markdown("**I don't want my playlist to be:**")
-        dont_want = st.multiselect(
-            label="I don't want",
-            options=[f for f in all_features if f not in want],
-            default=[],
-            placeholder="Pick features to avoid...",
-            label_visibility="collapsed"
-        )
-
+        dont_want = st.multiselect(label="I don't want", options=[f for f in all_features if f not in want],
+                                   default=[], placeholder="Pick features to avoid...", label_visibility="collapsed")
     with st.container(border=True):
         st.markdown("**Temperature**")
         st.caption("Higher values lead to more exotic results.")
-        temperature = st.slider(
-            label="Temperature",
-            min_value=0.0,
-            max_value=2.0,
-            step=0.05,
-            value=0.0,
-            label_visibility="collapsed"
-        )
-
+        temperature = st.slider(label="Temperature", min_value=0.0, max_value=2.0,
+                                step=0.05, value=0.0, label_visibility="collapsed")
     with st.container(border=True):
         st.markdown("**Number of songs**")
         st.caption("How many tracks should the playlist contain?")
-        num_songs = st.slider(
-            label="Number of songs",
-            min_value=5,
-            max_value=50,
-            step=1,
-            value=15,
-            label_visibility="collapsed"
-        )
-
+        num_songs = st.slider(label="Number of songs", min_value=5, max_value=50,
+                              step=1, value=15, label_visibility="collapsed")
     with st.container(border=True):
         st.markdown("**Playlist name**")
         if "survey_playlist_name" not in st.session_state:
             st.session_state.survey_playlist_name = "My Recommended Playlist"
-        playlist_name = st.text_input(
-            label="Playlist name",
-            key="survey_playlist_name",
-            max_chars=100,
-            placeholder="Enter a name for your Spotify playlist...",
-            label_visibility="collapsed"
-        )
-
-    # build the survey_data dict to store what the user selected
-    survey_data = {
-        "attribute": list(feature_to_attr.values()) + ["temperature"],
-        "choice": []
-    }
-    for feature in all_features:
-        if feature in want:
-            survey_data["choice"].append("yes")
-        elif feature in dont_want:
-            survey_data["choice"].append("no")
-        else:
-            survey_data["choice"].append(None)
-    survey_data["choice"].append(temperature)
-
+        st.text_input(label="Playlist name", key="survey_playlist_name", max_chars=100,
+                      placeholder="Enter a name for your Spotify playlist...", label_visibility="collapsed")
     st.markdown("")
-
-    # show the current weather and let the user decide if they want it to affect recommendations
     try:
-        weather_df = read_df(
-            "SELECT temperature_c, text_description FROM context_inputs ORDER BY fetched_at DESC LIMIT 1;"
-        )
+        weather_df = read_df("SELECT temperature_c, text_description FROM context_inputs ORDER BY fetched_at DESC LIMIT 1;")
         if not weather_df.empty:
             wr = weather_df.iloc[0]
-            temp = wr["temperature_c"]
-            desc = wr["text_description"] or "Unknown"
             with st.container(border=True):
                 st.markdown("**Current Weather**")
-                st.caption(f"🌡️ {desc}, {temp}°C")
-                apply_weather = st.toggle(
-                    "Apply weather to recommendations",
-                    value=True,
-                    help="When on, the current weather conditions influence which tracks are ranked higher."
-                )
+                st.caption(f"🌡️ {wr['text_description'] or 'Unknown'}, {wr['temperature_c']}°C")
+                apply_weather = st.toggle("Apply weather to recommendations", value=True,
+                                          help="When on, weather conditions influence which tracks are ranked higher.")
                 st.session_state.apply_weather = apply_weather
         else:
             st.session_state.apply_weather = False
     except Exception:
         st.session_state.apply_weather = False
-
     if st.button("Generate Playlist!", type="primary", use_container_width=True):
         st.session_state.survey_want = want
         st.session_state.survey_dont_want = dont_want
         st.session_state.survey_temperature = temperature
         st.session_state.survey_num_songs = num_songs
-        # survey_playlist_name is already in session state via key= binding
         if not st.session_state.survey_playlist_name.strip():
             st.session_state.survey_playlist_name = "My Recommended Playlist"
         st.session_state.page_state = "playlist"
         st.rerun()
 
-def save_playlist_to_spotify(df, playlist_name: str = "My Recommended Playlist"):
-    """Create a playlist on the user's Spotify account with the ranked tracks."""
-    import requests
 
+def save_playlist_to_spotify(df, playlist_name: str = "My Recommended Playlist"):
+    import requests
     token_info = st.session_state.get("token_info")
     if not token_info:
         st.error("Session expired — please log in again.")
         return
-
     access_token = token_info["access_token"]
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json",
-    }
-
-    # first create the empty playlist, then add the tracks to it
-    resp = requests.post(
-        "https://api.spotify.com/v1/me/playlists",
-        headers=headers,
-        json={
-            "name": playlist_name,
-            "description": "Generated by the Spotify Recommendation System",
-            "public": False,
-        },
-        timeout=20,
-    )
+    headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+    resp = requests.post("https://api.spotify.com/v1/me/playlists", headers=headers,
+                         json={"name": playlist_name, "description": "Generated by the Spotify Recommendation System", "public": False},
+                         timeout=20)
     resp.raise_for_status()
     playlist = resp.json()
     playlist_id = playlist["id"]
     playlist_url = playlist.get("external_urls", {}).get("spotify", "")
-
-    # spotify api only allows 100 tracks per request so we chunk it
     uris = [f"spotify:track:{tid}" for tid in df["spotify_track_id"].tolist()]
     for i in range(0, len(uris), 100):
-        batch = uris[i:i + 100]
-        r = requests.post(
-            f"https://api.spotify.com/v1/playlists/{playlist_id}/items",
-            headers=headers,
-            params={"uris": ",".join(batch)},
-            timeout=20,
-        )
+        r = requests.post(f"https://api.spotify.com/v1/playlists/{playlist_id}/items", headers=headers,
+                          params={"uris": ",".join(uris[i:i+100])}, timeout=20)
         r.raise_for_status()
-
     return playlist_url
 
 
@@ -318,6 +217,35 @@ def show_playlist():
         st.session_state.page_state = "login"
         st.rerun()
 
+    want_list   = st.session_state.get("survey_want", [])
+    dont_list   = st.session_state.get("survey_dont_want", [])
+    survey_temp = st.session_state.get("survey_temperature", 0.0)
+    apply_weather = st.session_state.get("apply_weather", False)
+
+    MOOD_SQL_COLS = {
+        "Happy":         ("af.valence",          ">=", 0.60),
+        "Sad":           ("af.valence",          "<=", 0.40),
+        "High Energy":   ("af.energy",           ">=", 0.70),
+        "Danceable":     ("af.danceability",     ">=", 0.65),
+        "Acoustic":      ("af.acousticness",     ">=", 0.50),
+        "Instrumental":  ("af.instrumentalness", ">=", 0.50),
+        "Live Sounding": ("af.liveness",         ">=", 0.30),
+        "Speech Heavy":  ("af.speechiness",      ">=", 0.10),
+        "High Tempo":    ("af.tempo",            ">=", 120),
+    }
+
+    mood_clauses = []
+    relax = survey_temp / 2.0 * 0.4
+    for feature, (col, op, thresh) in MOOD_SQL_COLS.items():
+        if feature in want_list:
+            relaxed = thresh * (1.0 - relax) if op == ">=" else thresh * (1.0 + relax)
+            mood_clauses.append(f"{col} {op} {relaxed:.4f}")
+        elif feature in dont_list:
+            flip_op = "<" if op == ">=" else ">"
+            relaxed = thresh * (1.0 + relax) if op == ">=" else thresh * (1.0 - relax)
+            mood_clauses.append(f"{col} {flip_op} {relaxed:.4f}")
+    mood_where = ("AND " + " AND ".join(mood_clauses)) if mood_clauses else ""
+
     sql = f"""
         SELECT
             rr.spotify_track_id,
@@ -325,6 +253,7 @@ def show_playlist():
             rr.primary_artist AS recommended_artist_names,
             rr.final_score,
             rr.cluster_similarity,
+            rr.context_score,
             rr.rank_position,
             af.danceability  AS recommended_danceability,
             af.energy        AS recommended_energy,
@@ -338,7 +267,6 @@ def show_playlist():
             t.popularity,
             t.duration_ms,
             t.explicit,
-            -- mark tracks whose catalog entry was stamped with the latest pipeline run as new
             CASE WHEN ct.pipeline_run_id = (
                 SELECT MAX(id) FROM pipeline_runs
                 WHERE user_id = (SELECT user_id FROM users WHERE spotify_user_hash = '{user_hash}')
@@ -358,19 +286,15 @@ def show_playlist():
             GROUP BY spotify_track_id
         ) ct ON ct.spotify_track_id = rr.spotify_track_id
         WHERE u.spotify_user_hash = '{user_hash}'
+        {mood_where}
         ORDER BY rr.rank_position
-        LIMIT 120;
+        LIMIT 500;
     """
     all_data = read_df(sql)
-    
     if "cluster_similarity" not in all_data.columns:
         all_data["cluster_similarity"] = all_data["final_score"]
-
     if all_data.empty:
-        st.warning(
-            "No recommendations found for your account yet. "
-            "Ask the project owner to run the pipeline for your Spotify user."
-        )
+        st.warning("No recommendations found for your account yet.")
         if st.button("Back to survey!", type="primary"):
             st.session_state.page_state = "survey"
             st.rerun()
@@ -378,7 +302,6 @@ def show_playlist():
 
     df = all_data.copy()
 
-    # re-rank the songs based on what the user selected in the survey
     FEATURE_MAP = {
         "Happy":        {"recommended_valence": +1.0},
         "Sad":          {"recommended_valence": -1.0},
@@ -390,103 +313,48 @@ def show_playlist():
         "Speech Heavy": {"recommended_speechiness": +1.0},
         "High Tempo":   {"recommended_tempo": +1.0},
     }
-    want_list = st.session_state.get("survey_want", [])
-    dont_list = st.session_state.get("survey_dont_want", [])
-    survey_temp = st.session_state.get("survey_temperature", 0.0)
-    apply_weather = st.session_state.get("apply_weather", False)
 
-    # --- step 1: build the base score (cluster similarity ± weather) ---
     base_score = df["cluster_similarity"].fillna(0.0)
-
     if apply_weather:
-        try:
-            weather_df = read_df(
-                "SELECT temperature_c, relative_humidity, wind_speed_m_s, text_description "
-                "FROM context_inputs ORDER BY fetched_at DESC LIMIT 1;"
-            )
-            if not weather_df.empty:
-                wr = weather_df.iloc[0]
-                weather_ctx = {
-                    "temperature_c": wr["temperature_c"],
-                    "relative_humidity": wr["relative_humidity"],
-                    "wind_speed_m_s": wr["wind_speed_m_s"],
-                    "text_description": str(wr["text_description"] or "").lower(),
-                }
-                # mirror context_fit_score from cluster.py
-                def _ctx_score(row):
-                    s, w = 0.0, 0.0
-                    temp = weather_ctx.get("temperature_c")
-                    desc = weather_ctx.get("text_description", "")
-                    wind = weather_ctx.get("wind_speed_m_s")
-                    en = float(row.get("recommended_energy", 0.5) or 0.5)
-                    va = float(row.get("recommended_valence", 0.5) or 0.5)
-                    da = float(row.get("recommended_danceability", 0.5) or 0.5)
-                    ac = float(row.get("recommended_acousticness", 0.5) or 0.5)
-                    if (temp is not None and temp < 10) or any(x in desc for x in ["fog","cloud","overcast","mist"]):
-                        s += (en + va) / 2; w += 1.0
-                    if any(x in desc for x in ["rain","storm","thunder","drizzle","shower"]):
-                        s += (ac + (1 - en)) / 2; w += 1.0
-                    if temp is not None and temp > 25:
-                        s += (da + va) / 2; w += 1.0
-                    if wind is not None and wind > 10:
-                        s += en; w += 1.0
-                    return s / w if w > 0 else 0.5
-                ctx_scores = df.apply(_ctx_score, axis=1)
-                base_score = 0.7 * base_score + 0.3 * ctx_scores
-        except Exception:
-            pass  # fall back to pure cluster similarity
-
+        if "context_score" in df.columns and df["context_score"].notna().any():
+            base_score = 0.7 * base_score + 0.3 * df["context_score"].fillna(0.0)
+        else:
+            st.caption("⚠️ No weather scores stored — run the pipeline again to get learned weather rankings.")
     df["_base_score"] = base_score
 
-    # --- step 2: blend in survey preferences via temperature ---
     survey_score = pd.Series(0.0, index=df.index)
     for feature, cols in FEATURE_MAP.items():
-        if feature in want_list:
-            for col, w in cols.items():
-                if col in df.columns:
-                    # normalise tempo (0-250 bpm range) to 0-1 before adding
-                    vals = df[col].astype(float)
-                    if col == "recommended_tempo":
-                        vals = (vals / 200.0).clip(0.0, 1.0)
-                    survey_score += w * vals
-        elif feature in dont_list:
-            for col, w in cols.items():
-                if col in df.columns:
-                    vals = df[col].astype(float)
-                    if col == "recommended_tempo":
-                        vals = (vals / 200.0).clip(0.0, 1.0)
-                    survey_score -= w * vals
+        for col, w in cols.items():
+            if col not in df.columns:
+                continue
+            vals = df[col].astype(float)
+            if col == "recommended_tempo":
+                vals = (vals / 200.0).clip(0.0, 1.0)
+            if feature in want_list:
+                survey_score += w * vals
+            elif feature in dont_list:
+                survey_score -= w * vals
 
     if want_list or dont_list:
         bs = df["_base_score"]
         bs_norm = (bs - bs.min()) / (bs.max() - bs.min() + 1e-9)
         ss_norm = (survey_score - survey_score.min()) / (survey_score.max() - survey_score.min() + 1e-9)
-        # temp=0 → alpha=1.0 (pure cluster), temp=2 → alpha=0 (pure survey)
         alpha = max(0.0, 1.0 - survey_temp / 2.0)
-        df["combined_score"] = alpha * bs_norm + (1 - alpha) * ss_norm
+        df["combined_score"] = alpha * ss_norm + (1 - alpha) * bs_norm
         df = df.sort_values("combined_score", ascending=False).reset_index(drop=True)
     else:
-        # no survey preferences — sort purely by base score
         df = df.sort_values("_base_score", ascending=False).reset_index(drop=True)
-    # --- end survey re-ranking ---
 
-    # trim to however many songs the user asked for in the slider
     num_songs = st.session_state.get("survey_num_songs", 15)
     df = df.head(num_songs).reset_index(drop=True)
 
-    # show the weather banner if the user toggled it on (scoring already applied above)
-    if apply_weather:
-        try:
-            weather_df = read_df(
-                "SELECT temperature_c, text_description FROM context_inputs ORDER BY fetched_at DESC LIMIT 1;"
-            )
-            if not weather_df.empty:
-                wr = weather_df.iloc[0]
-                st.info(f"🌡️ Weather-influenced ranking: **{wr['text_description']}**, **{wr['temperature_c']}°C**")
-        except Exception:
-            pass
-    else:
-        st.info("🎵 Audio-only ranking applied (weather influence off)")
+    # store exactly the trimmed playlist so analytics validates the same songs in the same order
+    st.session_state["current_playlist_df"] = df[[
+        "recommended_track_name", "recommended_artist_names",
+        "recommended_valence", "recommended_energy", "recommended_danceability",
+        "tempo", "recommended_acousticness", "recommended_instrumentalness",
+        "recommended_liveness", "recommended_speechiness",
+    ]].rename(columns={"tempo": "recommended_tempo"}).copy()
 
     feature_cols = {
         "recommended_danceability": "Danceability",
@@ -498,59 +366,33 @@ def show_playlist():
         "recommended_speechiness": "Speechiness",
     }
 
-    # normalized copy used only for the radar chart
+    # radar chart uses raw audio feature values (all naturally 0-1)
+    # so they match what's shown in the filter validation table
     radar_df = df.copy()
-    for col in feature_cols:
-        col_min = radar_df[col].min()
-        col_max = radar_df[col].max()
-        if col_max > col_min:
-            radar_df[col] = (radar_df[col] - col_min) / (col_max - col_min)
-        else:
-            radar_df[col] = 0.5
 
-    st.markdown("""
-    <style>
-    .song-row {
-        padding: 12px 16px;
-        border-radius: 8px;
-        transition: background-color 0.2s;
-        display: flex;
-        align-items: center;
-        gap: 12px;
-    }
-    .song-row-even { background-color: rgba(255,255,255,0.03); }
-    .song-row-odd  { background-color: rgba(255,255,255,0.08); }
-    .song-row:hover { background-color: rgba(29,185,84,0.15); }
-    .song-number { color: #888; font-size: 14px; min-width: 24px; text-align: right; }
-    .song-title  { font-weight: 600; font-size: 15px; }
-    .song-artist { color: #888; font-size: 13px; }
-    .new-tag {
-        display: inline-block; margin-left: 8px;
-        background: #1DB954; color: #000;
-        font-size: 10px; font-weight: 700; letter-spacing: 0.5px;
-        padding: 1px 6px; border-radius: 4px; vertical-align: middle;
-    }
-    .feature-title  { text-align: center; font-size: 18px; font-weight: 600; margin-bottom: 0; }
-    .feature-artist { text-align: center; color: #888; font-size: 14px; margin-top: 2px; }
-    .explicit-tag {
-        background-color: #888; color: #000; font-size: 10px; font-weight: 700;
-        padding: 1px 4px; border-radius: 2px; margin-left: 6px; vertical-align: middle;
-    }
-    .song-duration { color: #888; font-size: 12px; margin-left: 8px; }
-    .playlist-header { font-size: 26px; font-weight: 700; margin-bottom: 4px; }
-    .playlist-sub { color: #888; font-size: 14px; margin-bottom: 16px; }
-    </style>
-    """, unsafe_allow_html=True)
+    st.markdown("""<style>
+    .song-row { padding:12px 16px; border-radius:8px; display:flex; align-items:center; gap:12px; }
+    .song-row-even { background-color:rgba(255,255,255,0.03); }
+    .song-row-odd  { background-color:rgba(255,255,255,0.08); }
+    .song-row:hover { background-color:rgba(29,185,84,0.15); }
+    .song-number { color:#888; font-size:14px; min-width:24px; text-align:right; }
+    .song-title  { font-weight:600; font-size:15px; }
+    .song-artist { color:#888; font-size:13px; }
+    .new-tag { display:inline-block; margin-left:8px; background:#1DB954; color:#000;
+               font-size:10px; font-weight:700; padding:1px 6px; border-radius:4px; vertical-align:middle; }
+    .explicit-tag { background-color:#888; color:#000; font-size:10px; font-weight:700;
+                    padding:1px 4px; border-radius:2px; margin-left:6px; vertical-align:middle; }
+    .song-duration { color:#888; font-size:12px; margin-left:8px; }
+    .feature-title  { text-align:center; font-size:18px; font-weight:600; margin-bottom:0; }
+    .feature-artist { text-align:center; color:#888; font-size:14px; margin-top:2px; }
+    .playlist-header { font-size:26px; font-weight:700; margin-bottom:4px; }
+    .playlist-sub { color:#888; font-size:14px; margin-bottom:16px; }
+    </style>""", unsafe_allow_html=True)
 
-    # weather banner
-    if st.session_state.get("apply_weather", False):
+    if apply_weather:
         try:
-            weather_df = read_df(
-                "SELECT temperature_c, text_description FROM context_inputs ORDER BY fetched_at DESC LIMIT 1;"
-            )
-            if not weather_df.empty:
-                wr = weather_df.iloc[0]
-                st.info(f"🌡️ Weather-influenced ranking: **{wr['text_description'] or ''}**, **{wr['temperature_c']}°C**")
+            wr = read_df("SELECT temperature_c, text_description FROM context_inputs ORDER BY fetched_at DESC LIMIT 1;").iloc[0]
+            st.info(f"🌡️ Weather-influenced ranking: **{wr['text_description'] or ''}**, **{wr['temperature_c']}°C**")
         except Exception:
             pass
     else:
@@ -564,7 +406,6 @@ def show_playlist():
         st.session_state.selected_song = None
 
     left, right = st.columns([1, 1], gap="large")
-
     with left:
         with st.container(border=True, height=550):
             for i, row in df.iterrows():
@@ -576,15 +417,11 @@ def show_playlist():
                     duration_ms = int(row.get("duration_ms") or 0)
                     duration_str = f'{duration_ms // 60000}:{(duration_ms % 60000) // 1000:02d}'
                     st.markdown(
-                        f'<div class="song-row {parity}">'
-                        f'<span class="song-number">{i + 1}</span>'
-                        f'<div>'
-                        f'<span class="song-title">{row["recommended_track_name"]}</span>{explicit_tag}{new_tag}<br>'
+                        f'<div class="song-row {parity}"><span class="song-number">{i+1}</span>'
+                        f'<div><span class="song-title">{row["recommended_track_name"]}</span>{explicit_tag}{new_tag}<br>'
                         f'<span class="song-artist">{row["recommended_artist_names"]}</span>'
-                        f'<span class="song-duration">{duration_str}</span>'
-                        f'</div></div>',
-                        unsafe_allow_html=True
-                    )
+                        f'<span class="song-duration">{duration_str}</span></div></div>',
+                        unsafe_allow_html=True)
                 with col2:
                     if st.button("View", key=f"view_{i}", use_container_width=True):
                         st.session_state.selected_song = i
@@ -598,147 +435,82 @@ def show_playlist():
                 st.markdown(
                     f'<p class="feature-title">{row["recommended_track_name"]}</p>'
                     f'<p class="feature-artist">{row["recommended_artist_names"]}</p>',
-                    unsafe_allow_html=True
-                )
+                    unsafe_allow_html=True)
                 fig = go.Figure(data=go.Scatterpolar(
-                    r=values + [values[0]],
-                    theta=categories + [categories[0]],
-                    fill='toself',
-                    line=dict(color='#1DB954', width=2),
-                    fillcolor='rgba(29, 185, 84, 0.2)',
-                    marker=dict(size=5, color='#1DB954')
-                ))
+                    r=values+[values[0]], theta=categories+[categories[0]],
+                    fill='toself', line=dict(color='#1DB954', width=2),
+                    fillcolor='rgba(29,185,84,0.2)', marker=dict(size=5, color='#1DB954')))
                 fig.update_layout(
-                    polar=dict(
-                        radialaxis=dict(visible=True, range=[0, 1], showticklabels=False, gridcolor='rgba(150,150,150,0.2)'),
-                        angularaxis=dict(gridcolor='rgba(150,150,150,0.2)'),
-                        bgcolor='rgba(0,0,0,0)'
-                    ),
-                    showlegend=False,
-                    margin=dict(l=50, r=50, t=30, b=30),
-                    height=420,
-                    paper_bgcolor='rgba(0,0,0,0)',
-                    plot_bgcolor='rgba(0,0,0,0)',
-                    font=dict(size=12)
-                )
+                    polar=dict(radialaxis=dict(visible=True, range=[0,1], showticklabels=False,
+                               gridcolor='rgba(150,150,150,0.2)'),
+                               angularaxis=dict(gridcolor='rgba(150,150,150,0.2)'), bgcolor='rgba(0,0,0,0)'),
+                    showlegend=False, margin=dict(l=50,r=50,t=30,b=30), height=420,
+                    paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(size=12))
                 st.plotly_chart(fig, use_container_width=True)
         else:
             with st.container(border=True, height=550):
-                st.markdown("<br>" * 8, unsafe_allow_html=True)
+                st.markdown("<br>"*8, unsafe_allow_html=True)
                 st.markdown("<p style='text-align:center;color:#888;font-size:15px;'>Select a song to view its audio features</p>", unsafe_allow_html=True)
 
     st.divider()
     st.markdown("### Playlist Stats")
-
     chart_df = df.copy()
     chart_df["label"] = df["recommended_artist_names"] + " — " + df["recommended_track_name"]
-
     feature_options = {
-        "Danceability": "recommended_danceability",
-        "Energy": "recommended_energy",
-        "Valence": "recommended_valence",
-        "Acousticness": "recommended_acousticness",
-        "Instrumentalness": "recommended_instrumentalness",
-        "Liveness": "recommended_liveness",
-        "Speechiness": "recommended_speechiness",
-        "Tempo": "tempo",
+        "Danceability": "recommended_danceability", "Energy": "recommended_energy",
+        "Valence": "recommended_valence", "Acousticness": "recommended_acousticness",
+        "Instrumentalness": "recommended_instrumentalness", "Liveness": "recommended_liveness",
+        "Speechiness": "recommended_speechiness", "Tempo": "tempo",
     }
-
     ctrl_left, ctrl_right = st.columns([2, 1], gap="large")
     with ctrl_left:
         selected_feature = st.selectbox("Feature", options=list(feature_options.keys()), label_visibility="collapsed")
     with ctrl_right:
         direction = st.radio("Direction", options=["Highest", "Lowest"], horizontal=True, label_visibility="collapsed")
-
     highest = direction == "Highest"
     col = feature_options[selected_feature]
     deduped = chart_df.sort_values(col, ascending=False).drop_duplicates(subset=["label"]).reset_index(drop=True)
-    top10 = deduped.nlargest(10, col) if highest else deduped.nsmallest(10, col)
-    top10 = top10.sort_values(col, ascending=highest).reset_index(drop=True)
-
-    fig_feat = go.Figure(go.Bar(
-        x=top10[col],
-        y=top10["label"],
-        orientation='h',
-        marker_color='#1DB954'
-    ))
-    fig_feat.update_layout(
-        title=f"Top 10 {'Highest' if highest else 'Lowest'} — {selected_feature}",
-        height=400,
-        margin=dict(l=0, r=20, t=40, b=20),
-        paper_bgcolor='rgba(0,0,0,0)',
-        plot_bgcolor='rgba(0,0,0,0)',
-        font=dict(color='white'),
-        xaxis=dict(gridcolor='rgba(150,150,150,0.2)', title=selected_feature),
-        yaxis=dict(gridcolor='rgba(0,0,0,0)')
-    )
+    top10 = (deduped.nlargest(10, col) if highest else deduped.nsmallest(10, col)).sort_values(col, ascending=highest)
+    fig_feat = go.Figure(go.Bar(x=top10[col], y=top10["label"], orientation='h', marker_color='#1DB954'))
+    fig_feat.update_layout(title=f"Top 10 {'Highest' if highest else 'Lowest'} — {selected_feature}",
+                           height=400, margin=dict(l=0,r=20,t=40,b=20),
+                           paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='white'),
+                           xaxis=dict(gridcolor='rgba(150,150,150,0.2)', title=selected_feature),
+                           yaxis=dict(gridcolor='rgba(0,0,0,0)'))
     st.plotly_chart(fig_feat, use_container_width=True)
 
     col_artist, col_pca = st.columns(2, gap="large")
-
     with col_artist:
-        artist_counts = (
-            chart_df["recommended_artist_names"]
-            .value_counts()
-            .reset_index()
-        )
-        artist_counts.columns = ["artist", "count"]
-        artist_counts = artist_counts.sort_values("count", ascending=False)
-
-        fig_artist = go.Figure(go.Bar(
-            x=artist_counts["artist"],
-            y=artist_counts["count"],
-            marker_color='#1DB954'
-        ))
-        fig_artist.update_layout(
-            title="Most Frequent Artists",
-            height=400,
-            margin=dict(l=20, r=20, t=40, b=100),
-            paper_bgcolor='rgba(0,0,0,0)',
-            plot_bgcolor='rgba(0,0,0,0)',
-            font=dict(color='white'),
-            xaxis=dict(gridcolor='rgba(0,0,0,0)', tickangle=-35),
-            yaxis=dict(gridcolor='rgba(150,150,150,0.2)', title="Tracks", dtick=1)
-        )
+        ac = chart_df["recommended_artist_names"].value_counts().reset_index()
+        ac.columns = ["artist", "count"]
+        fig_artist = go.Figure(go.Bar(x=ac["artist"], y=ac["count"], marker_color='#1DB954'))
+        fig_artist.update_layout(title="Most Frequent Artists", height=400,
+                                 margin=dict(l=20,r=20,t=40,b=100),
+                                 paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='white'),
+                                 xaxis=dict(gridcolor='rgba(0,0,0,0)', tickangle=-35),
+                                 yaxis=dict(gridcolor='rgba(150,150,150,0.2)', title="Tracks", dtick=1))
         st.plotly_chart(fig_artist, use_container_width=True)
-
     with col_pca:
         from sklearn.preprocessing import StandardScaler
         from sklearn.decomposition import PCA
-
-        pca_features = [
-            "recommended_danceability", "recommended_energy", "recommended_valence",
-            "recommended_acousticness", "recommended_instrumentalness",
-            "recommended_liveness", "recommended_speechiness"
-        ]
-        pca_df = chart_df[pca_features].fillna(0)
-        scaled = StandardScaler().fit_transform(pca_df)
+        pca_features = ["recommended_danceability","recommended_energy","recommended_valence",
+                        "recommended_acousticness","recommended_instrumentalness",
+                        "recommended_liveness","recommended_speechiness"]
+        scaled = StandardScaler().fit_transform(chart_df[pca_features].fillna(0))
         coords = PCA(n_components=2).fit_transform(scaled)
-
-        chart_df["pc1"] = coords[:, 0]
-        chart_df["pc2"] = coords[:, 1]
-
+        chart_df["pc1"], chart_df["pc2"] = coords[:,0], coords[:,1]
         fig_pca = go.Figure(go.Scatter(
-            x=chart_df["pc1"],
-            y=chart_df["pc2"],
-            mode="markers+text",
-            text=chart_df["recommended_track_name"],
-            textposition="top center",
+            x=chart_df["pc1"], y=chart_df["pc2"], mode="markers+text",
+            text=chart_df["recommended_track_name"], textposition="top center",
             textfont=dict(size=9, color="rgba(255,255,255,0.6)"),
             marker=dict(size=10, color='#1DB954', opacity=0.85),
             hovertemplate="<b>%{text}</b><br>%{customdata}<extra></extra>",
-            customdata=chart_df["recommended_artist_names"]
-        ))
-        fig_pca.update_layout(
-            title="Song Similarity Map (PCA)",
-            height=400,
-            margin=dict(l=20, r=20, t=40, b=20),
-            paper_bgcolor='rgba(0,0,0,0)',
-            plot_bgcolor='rgba(0,0,0,0)',
-            font=dict(color='white'),
-            xaxis=dict(title="PC1", gridcolor='rgba(150,150,150,0.15)', zeroline=False),
-            yaxis=dict(title="PC2", gridcolor='rgba(150,150,150,0.15)', zeroline=False)
-        )
+            customdata=chart_df["recommended_artist_names"]))
+        fig_pca.update_layout(title="Song Similarity Map (PCA)", height=400,
+                              margin=dict(l=20,r=20,t=40,b=20),
+                              paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='white'),
+                              xaxis=dict(title="PC1", gridcolor='rgba(150,150,150,0.15)', zeroline=False),
+                              yaxis=dict(title="PC2", gridcolor='rgba(150,150,150,0.15)', zeroline=False))
         st.plotly_chart(fig_pca, use_container_width=True)
 
     st.divider()
@@ -749,7 +521,10 @@ def show_playlist():
                 try:
                     playlist_url = save_playlist_to_spotify(df, playlist_name=pname)
                     st.session_state.survey_playlist_name = "My Recommended Playlist"
-                    st.success(f"✅ **{pname}** saved! [Open in Spotify]({playlist_url})")
+                    if playlist_url:
+                        st.success(f"✅ **{pname}** saved! [Open in Spotify]({playlist_url})")
+                    else:
+                        st.success(f"✅ **{pname}** saved!")
                 except Exception as e:
                     st.error(f"Failed to create playlist: {e}")
     with col_back:
@@ -770,108 +545,127 @@ def show_analytics():
 
     st.markdown("## 📊 Analytics")
 
-    # ── 1. Filter validation ──────────────────────────────────────────────────
-    with st.expander("🎯 Filter validation — does the playlist match your mood?", expanded=True):
-        want_list = st.session_state.get("survey_want", [])
-        dont_list = st.session_state.get("survey_dont_want", [])
-
-        if not want_list and not dont_list:
-            st.caption("No mood filters selected — run the survey first.")
-        else:
-            try:
-                val_df = read_df(f"""
+    # ── 0. Weather influence ──────────────────────────────────────────────────
+    with st.expander("🌤️ Weather influence — how today's weather shaped your recommendations", expanded=True):
+        try:
+            weather_df = read_df("SELECT temperature_c, relative_humidity, wind_speed_m_s, text_description, fetched_at "
+                                 "FROM context_inputs ORDER BY fetched_at DESC LIMIT 1;")
+            if weather_df.empty:
+                st.caption("No weather data recorded yet.")
+            else:
+                wr = weather_df.iloc[0]
+                c1,c2,c3,c4 = st.columns(4)
+                c1.metric("Condition", str(wr["text_description"] or "Unknown").title())
+                c2.metric("Temperature", f"{wr['temperature_c']}°C")
+                c3.metric("Humidity", f"{wr['relative_humidity']}%" if wr["relative_humidity"] else "—")
+                c4.metric("Wind", f"{wr['wind_speed_m_s']} m/s" if wr["wind_speed_m_s"] else "—")
+                score_df = read_df(f"""
                     SELECT rr.name AS track, rr.primary_artist AS artist,
-                           af.valence, af.energy, af.danceability,
-                           af.acousticness, af.instrumentalness,
-                           af.liveness, af.speechiness, af.tempo
+                           rr.cluster_similarity, rr.context_score, rr.final_score,
+                           af.energy, af.valence, af.acousticness, af.danceability, af.tempo
                     FROM ranked_recommendations rr
                     JOIN users u ON u.user_id = rr.user_id
                     JOIN audio_features af ON af.spotify_track_id = rr.spotify_track_id
                     WHERE u.spotify_user_hash = '{user_hash}'
-                    ORDER BY rr.rank_position LIMIT 20;
+                    ORDER BY rr.rank_position;
                 """)
-                if val_df.empty:
-                    st.caption("No recommendations found.")
+                if not score_df.empty and score_df["context_score"].notna().any() and score_df["context_score"].sum() > 0:
+                    top5 = score_df.nlargest(5, "context_score")[["track","artist","context_score","energy","valence","acousticness"]]
+                    bot5 = score_df.nsmallest(5, "context_score")[["track","artist","context_score","energy","valence","acousticness"]]
+                    st.markdown("**Top 5 songs most suited to today's weather:**")
+                    st.dataframe(top5.style.format({"context_score":"{:.3f}","energy":"{:.2f}","valence":"{:.2f}","acousticness":"{:.2f}"}), use_container_width=True, hide_index=True)
+                    st.markdown("**Bottom 5 songs least suited to today's weather:**")
+                    st.dataframe(bot5.style.format({"context_score":"{:.3f}","energy":"{:.2f}","valence":"{:.2f}","acousticness":"{:.2f}"}), use_container_width=True, hide_index=True)
+                    compare = pd.DataFrame({"Top 5 (weather match)": top5[["energy","valence","acousticness"]].mean(),
+                                            "Bottom 5 (weather mismatch)": bot5[["energy","valence","acousticness"]].mean()})
+                    st.markdown("**Audio profile comparison:**")
+                    st.dataframe(compare.style.format("{:.2f}"), use_container_width=True)
                 else:
-                    THRESHOLDS = {
-                        "Happy":         ("valence",          ">=", 0.60),
-                        "Sad":           ("valence",          "<=", 0.40),
-                        "High Energy":   ("energy",           ">=", 0.70),
-                        "Danceable":     ("danceability",     ">=", 0.65),
-                        "Acoustic":      ("acousticness",     ">=", 0.50),
-                        "Instrumental":  ("instrumentalness", ">=", 0.50),
-                        "Live Sounding": ("liveness",         ">=", 0.30),
-                        "Speech Heavy":  ("speechiness",      ">=", 0.10),
-                        "High Tempo":    ("tempo",            ">=", 120),
-                    }
-                    for feature in want_list + dont_list:
-                        if feature not in THRESHOLDS:
-                            continue
-                        col, op, thresh = THRESHOLDS[feature]
-                        if col not in val_df.columns:
-                            continue
-                        total = len(val_df)
-                        passing = (val_df[col] >= thresh).sum() if op == ">=" else (val_df[col] <= thresh).sum()
-                        pass_rate = passing / total
-                        is_want = feature in want_list
-                        match_score = pass_rate if is_want else (1.0 - pass_rate)
-                        pct = int(match_score * 100)
-                        direction = "want" if is_want else "don't want"
-                        color = "#1DB954" if match_score >= 0.6 else "#e05c5c"
-                        label_color = "#aaa"
-                        st.markdown(f"""
-                        <div style="margin-bottom:10px;">
-                            <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
-                                <span style="font-size:14px; font-weight:600; color:white;">{feature} <span style="font-weight:400; color:{label_color}; font-size:12px;">({direction})</span></span>
-                                <span style="font-size:14px; font-weight:700; color:{color};">{pct}%</span>
-                            </div>
-                            <div style="background:#2a2a2a; border-radius:6px; height:8px; width:100%;">
-                                <div style="background:{color}; width:{pct}%; height:8px; border-radius:6px; transition:width 0.3s;"></div>
-                            </div>
+                    st.caption("Weather scores are all zero — need 5+ recently played tracks matched to weather readings.")
+        except Exception as e:
+            st.caption(f"Could not load weather analytics: {e}")
+
+    # ── 1. Filter validation — uses exact playlist songs in playlist order ─────
+    with st.expander("🎯 Filter validation — does the playlist match your mood?", expanded=True):
+        want_list = st.session_state.get("survey_want", [])
+        dont_list = st.session_state.get("survey_dont_want", [])
+        if not want_list and not dont_list:
+            st.caption("No mood filters selected — run the survey first.")
+        else:
+            playlist_df = st.session_state.get("current_playlist_df")
+            if playlist_df is None or playlist_df.empty:
+                st.caption("Generate a playlist first to see validation.")
+            else:
+                # rename recommended_* columns to plain names for MOOD_THRESHOLDS lookup
+                val_df = playlist_df.rename(columns={
+                    "recommended_track_name":       "track",
+                    "recommended_artist_names":     "artist",
+                    "recommended_valence":          "valence",
+                    "recommended_energy":           "energy",
+                    "recommended_danceability":     "danceability",
+                    "recommended_tempo":            "tempo",
+                    "recommended_acousticness":     "acousticness",
+                    "recommended_instrumentalness": "instrumentalness",
+                    "recommended_liveness":         "liveness",
+                    "recommended_speechiness":      "speechiness",
+                })
+                for feature in want_list + dont_list:
+                    if feature not in MOOD_THRESHOLDS:
+                        continue
+                    analytics_col, _, op, thresh = MOOD_THRESHOLDS[feature]
+                    if analytics_col not in val_df.columns:
+                        continue
+                    total = len(val_df)
+                    passing = (val_df[analytics_col] >= thresh).sum() if op == ">=" else (val_df[analytics_col] <= thresh).sum()
+                    is_want = feature in want_list
+                    match_score = (passing / total) if is_want else (1.0 - passing / total)
+                    pct = int(match_score * 100)
+                    color = "#1DB954" if match_score >= 0.6 else "#e05c5c"
+                    direction = "want" if is_want else "don't want"
+                    st.markdown(f"""
+                    <div style="margin-bottom:10px;">
+                        <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
+                            <span style="font-size:14px; font-weight:600; color:white;">{feature}
+                                <span style="font-weight:400; color:#aaa; font-size:12px;">({direction})</span>
+                            </span>
+                            <span style="font-size:14px; font-weight:700; color:{color};">{pct}%</span>
                         </div>
-                        """, unsafe_allow_html=True)
+                        <div style="background:#2a2a2a; border-radius:6px; height:8px; width:100%;">
+                            <div style="background:{color}; width:{pct}%; height:8px; border-radius:6px;"></div>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                display_cols = [c for c in ["track","artist","valence","energy","danceability","tempo"] if c in val_df.columns]
+                st.dataframe(val_df[display_cols].style.format(
+                    {"valence":"{:.2f}","energy":"{:.2f}","danceability":"{:.2f}","tempo":"{:.0f}"}),
+                    use_container_width=True, hide_index=True)
 
-                    st.dataframe(
-                        val_df[["track", "artist", "valence", "energy", "danceability", "tempo"]].style.format(
-                            {"valence": "{:.2f}", "energy": "{:.2f}", "danceability": "{:.2f}", "tempo": "{:.0f}"}
-                        ),
-                        use_container_width=True, hide_index=True,
-                    )
-            except Exception as e:
-                st.caption(f"Could not load validation data: {e}")
-
-    # ── 2. Top track history ──────────────────────────────────────────────────
+    # ── 2. Top track taste drift ──────────────────────────────────────────────
     with st.expander("📈 Top track taste drift over time"):
         try:
             hist_df = read_df(f"""
                 SELECT s.snapshot_date, s.time_range,
-                       AVG(af.energy) AS avg_energy,
-                       AVG(af.valence) AS avg_valence,
+                       AVG(af.energy) AS avg_energy, AVG(af.valence) AS avg_valence,
                        AVG(af.danceability) AS avg_danceability
                 FROM user_top_track_snapshots s
                 JOIN users u ON u.user_id = s.user_id
                 JOIN audio_features af ON af.spotify_track_id = s.spotify_track_id
                 WHERE u.spotify_user_hash = '{user_hash}'
-                GROUP BY s.snapshot_date, s.time_range
-                ORDER BY s.snapshot_date, s.time_range;
+                GROUP BY s.snapshot_date, s.time_range ORDER BY s.snapshot_date, s.time_range;
             """)
             if hist_df.empty or len(hist_df["snapshot_date"].unique()) < 2:
                 st.caption("Run the pipeline on multiple days to see taste drift here.")
             else:
-                for tr in ["short_term", "medium_term", "long_term"]:
+                for tr in ["short_term","medium_term","long_term"]:
                     subset = hist_df[hist_df["time_range"] == tr]
-                    if subset.empty:
-                        continue
-                    st.markdown(f"**{tr.replace('_', ' ').title()}**")
-                    fig = px.line(
-                        subset, x="snapshot_date",
-                        y=["avg_energy", "avg_valence", "avg_danceability"],
-                        labels={"value": "Score (0–1)", "snapshot_date": "Date", "variable": "Feature"},
-                        color_discrete_map={"avg_energy": "#1DB954", "avg_valence": "#FFA500", "avg_danceability": "#1E90FF"},
-                    )
-                    fig.update_layout(height=220, margin=dict(l=0, r=0, t=10, b=0),
-                        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                        font=dict(size=11), legend=dict(orientation="h", y=-0.35))
+                    if subset.empty: continue
+                    st.markdown(f"**{tr.replace('_',' ').title()}**")
+                    fig = px.line(subset, x="snapshot_date", y=["avg_energy","avg_valence","avg_danceability"],
+                                  labels={"value":"Score (0–1)","snapshot_date":"Date","variable":"Feature"},
+                                  color_discrete_map={"avg_energy":"#1DB954","avg_valence":"#FFA500","avg_danceability":"#1E90FF"})
+                    fig.update_layout(height=220, margin=dict(l=0,r=0,t=10,b=0),
+                                      paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                                      font=dict(size=11), legend=dict(orientation="h",y=-0.35))
                     st.plotly_chart(fig, use_container_width=True)
         except Exception as e:
             st.caption(f"Could not load top track history: {e}")
@@ -880,47 +674,39 @@ def show_analytics():
     with st.expander("🕐 Recently played listening trends"):
         try:
             rec_df = read_df(f"""
-                SELECT DATE(rp.played_at) AS play_date,
-                       COUNT(*) AS plays,
-                       AVG(af.energy) AS avg_energy,
-                       AVG(af.valence) AS avg_valence,
+                SELECT DATE(rp.played_at) AS play_date, COUNT(*) AS plays,
+                       AVG(af.energy) AS avg_energy, AVG(af.valence) AS avg_valence,
                        AVG(af.danceability) AS avg_danceability
                 FROM user_recently_played rp
                 JOIN users u ON u.user_id = rp.user_id
                 JOIN audio_features af ON af.spotify_track_id = rp.spotify_track_id
                 WHERE u.spotify_user_hash = '{user_hash}'
-                GROUP BY DATE(rp.played_at)
-                ORDER BY play_date DESC LIMIT 30;
+                GROUP BY DATE(rp.played_at) ORDER BY play_date DESC LIMIT 30;
             """)
             if rec_df.empty:
                 st.caption("No recently played data yet.")
             else:
-                c1, c2, c3, c4 = st.columns(4)
+                c1,c2,c3,c4 = st.columns(4)
                 c1.metric("Days tracked", len(rec_df))
                 c2.metric("Total plays", int(rec_df["plays"].sum()))
                 c3.metric("Avg energy", f"{rec_df['avg_energy'].mean():.2f}")
                 c4.metric("Avg mood", f"{rec_df['avg_valence'].mean():.2f}")
-
                 fig = px.bar(rec_df.sort_values("play_date"), x="play_date", y="plays",
-                    labels={"play_date": "Date", "plays": "Tracks played"},
-                    color_discrete_sequence=["#1DB954"])
-                fig.update_layout(height=200, margin=dict(l=0, r=0, t=10, b=0),
-                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font=dict(size=11))
+                             labels={"play_date":"Date","plays":"Tracks played"},
+                             color_discrete_sequence=["#1DB954"])
+                fig.update_layout(height=200, margin=dict(l=0,r=0,t=10,b=0),
+                                  paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font=dict(size=11))
                 st.plotly_chart(fig, use_container_width=True)
         except Exception as e:
             st.caption(f"Could not load recently played data: {e}")
 
-    # ── 4. Catalog expansion ─────────────────────────────────────────────────
+    # ── 4. Catalog expansion ──────────────────────────────────────────────────
     with st.expander("🗂️ Catalog — all songs contributing to recommendations"):
         try:
             cat_df = read_df(f"""
-                SELECT
-                    t.name AS track,
-                    t.primary_artist AS artist,
-                    ct.seed_type,
-                    ct.seed_value,
-                    ct.pulled_at::date AS added_date,
-                    CASE WHEN ct.pulled_at >= NOW() - INTERVAL '24 hours' THEN true ELSE false END AS is_new
+                SELECT t.name AS track, t.primary_artist AS artist, ct.seed_type, ct.seed_value,
+                       ct.pulled_at::date AS added_date,
+                       CASE WHEN ct.pulled_at >= NOW() - INTERVAL '24 hours' THEN true ELSE false END AS is_new
                 FROM catalog_tracks ct
                 JOIN tracks t ON t.spotify_track_id = ct.spotify_track_id
                 JOIN users u ON u.user_id = ct.user_id
@@ -930,25 +716,16 @@ def show_analytics():
             if cat_df.empty:
                 st.caption("Catalog is empty — run the pipeline first.")
             else:
-                total = len(cat_df)
-                new_count = int(cat_df["is_new"].sum())
-                recent_seeded = int((cat_df["seed_type"] == "artist_recent").sum())
-
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Total catalog tracks", total)
-                c2.metric("Added in last 24h", new_count)
-                c3.metric("Seeded from recents", recent_seeded)
-
-                # highlight new rows
+                c1,c2,c3 = st.columns(3)
+                c1.metric("Total catalog tracks", len(cat_df))
+                c2.metric("Added in last 24h", int(cat_df["is_new"].sum()))
+                c3.metric("Seeded from recents", int((cat_df["seed_type"] == "artist_recent").sum()))
                 def _highlight(row):
-                    return ["background-color: rgba(29,185,84,0.12)"] * len(row) if row["is_new"] else [""] * len(row)
-
-                display = cat_df[["track", "artist", "seed_type", "seed_value", "added_date", "is_new"]]
+                    return ["background-color:rgba(29,185,84,0.12)"]*len(row) if row["is_new"] else [""]*len(row)
                 st.dataframe(
-                    display.style.apply(_highlight, axis=1).format({"is_new": lambda x: "🆕" if x else ""}),
-                    use_container_width=True,
-                    hide_index=True,
-                )
+                    cat_df[["track","artist","seed_type","seed_value","added_date","is_new"]]
+                    .style.apply(_highlight, axis=1).format({"is_new": lambda x: "🆕" if x else ""}),
+                    use_container_width=True, hide_index=True)
         except Exception as e:
             st.caption(f"Could not load catalog data: {e}")
 
@@ -956,13 +733,8 @@ def show_analytics():
     with st.expander("⚙️ Pipeline run history"):
         try:
             runs_df = read_df(f"""
-                SELECT
-                    pr.id AS run_id,
-                    pr.started_at::date AS run_date,
-                    pr.started_at,
-                    pr.completed_at,
-                    pr.catalog_tracks_added,
-                    pr.recommendations_written
+                SELECT pr.id AS run_id, pr.started_at::date AS run_date, pr.started_at,
+                       pr.completed_at, pr.catalog_tracks_added, pr.recommendations_written
                 FROM pipeline_runs pr
                 JOIN users u ON u.user_id = pr.user_id
                 WHERE u.spotify_user_hash = '{user_hash}'
@@ -972,18 +744,11 @@ def show_analytics():
                 st.caption("No pipeline runs recorded yet.")
             else:
                 st.metric("Total pipeline runs", len(runs_df))
-                st.dataframe(
-                    runs_df.rename(columns={
-                        "run_id": "Run ID",
-                        "run_date": "Date",
-                        "started_at": "Started",
-                        "completed_at": "Completed",
-                        "catalog_tracks_added": "Catalog Tracks",
-                        "recommendations_written": "Recommendations",
-                    }),
-                    use_container_width=True,
-                    hide_index=True,
-                )
+                st.dataframe(runs_df.rename(columns={
+                    "run_id":"Run ID","run_date":"Date","started_at":"Started",
+                    "completed_at":"Completed","catalog_tracks_added":"Catalog Tracks",
+                    "recommendations_written":"Recommendations"}),
+                    use_container_width=True, hide_index=True)
         except Exception as e:
             st.caption(f"Could not load pipeline history: {e}")
 

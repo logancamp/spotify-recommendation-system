@@ -150,16 +150,38 @@ def load_user_profile_from_db(user_hash: str, time_range: str = "long_term") -> 
 
 
 def load_candidates_from_db(user_hash: str, limit: int = 500) -> pd.DataFrame:
+    """
+    Pull candidate tracks for this user from the catalog_tracks table.
+    """
     sql = f"""
     SELECT
+      c.catalog_id,
+      c.source,
+      c.query_used,
+      c.seed_type,
+      c.seed_value,
+      usr.spotify_user_hash,
       t.spotify_track_id,
       t.name,
       t.primary_artist,
-      a.acousticness, a.danceability, a.energy, a.instrumentalness,
-      a.liveness, a.loudness, a.speechiness, a.tempo, a.valence
-    FROM audio_features a
-    JOIN tracks t ON t.spotify_track_id = a.spotify_track_id
-    ORDER BY RANDOM()
+      a.acousticness,
+      a.danceability,
+      a.energy,
+      a.instrumentalness,
+      a.liveness,
+      a.loudness,
+      a.speechiness,
+      a.tempo,
+      a.valence
+    FROM catalog_tracks c
+    JOIN users usr
+      ON usr.user_id = c.user_id
+    JOIN tracks t
+      ON t.spotify_track_id = c.spotify_track_id
+    JOIN audio_features a
+      ON a.spotify_track_id = c.spotify_track_id
+    WHERE usr.spotify_user_hash = '{user_hash}'
+    ORDER BY c.pulled_at DESC
     LIMIT {int(limit)};
     """
     return read_df(sql)
@@ -257,10 +279,44 @@ def encode_weather_features(df: pd.DataFrame) -> pd.DataFrame:
 
 # --- clustering functions ---
 
-def cluster_tracks_by_audio(df: pd.DataFrame, n_clusters: int = 4, cluster_col: str = "audio_cluster"):
+def select_optimal_k(X: pd.DataFrame, k_min: int = 2, k_max: int = 8) -> int:
+    """
+    Sweep k from k_min to k_max and return the k that maximises the silhouette score.
+    Silhouette score measures intra-cluster cohesion vs inter-cluster separation (-1 to 1,
+    higher is better). Falls back to k_min if not enough distinct points exist.
+    """
+    from sklearn.metrics import silhouette_score
+
+    distinct_points = len(X.drop_duplicates())
+    k_max = min(k_max, len(X) - 1, distinct_points - 1)
+    k_min = max(2, k_min)
+
+    if k_max < k_min:
+        print(f"Not enough distinct points for silhouette sweep — using k={k_min}")
+        return k_min
+
+    best_k, best_score = k_min, -1.0
+    for k in range(k_min, k_max + 1):
+        kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
+        labels = kmeans.fit_predict(X)
+        # silhouette_score requires at least 2 distinct labels
+        if len(set(labels)) < 2:
+            continue
+        score = silhouette_score(X, labels)
+        print(f"  k={k}  silhouette={score:.4f}")
+        if score > best_score:
+            best_score = score
+            best_k = k
+
+    print(f"Optimal k={best_k} (silhouette={best_score:.4f})")
+    return best_k
+
+
+def cluster_tracks_by_audio(df: pd.DataFrame, n_clusters: int = None, cluster_col: str = "audio_cluster"): # type: ignore
     """
     Run KMeans on the audio feature columns to group similar songs together.
-    Returns the clustered df, a centroids df, and the kmeans model.
+    If n_clusters is None, automatically selects the optimal k via silhouette score sweep
+    (k=2 through k=8). Returns the clustered df, a centroids df, and the kmeans model.
     """
     df = df.copy()
     validate_audio_cols(df)
@@ -271,9 +327,14 @@ def cluster_tracks_by_audio(df: pd.DataFrame, n_clusters: int = 4, cluster_col: 
         raise ValueError("No rows remain after dropping missing audio feature values.")
 
     X = clean_df[AUDIO_FEATURE_COLS]
-    distinct_points = len(X.drop_duplicates())
-    k = min(n_clusters, len(clean_df), distinct_points)
-    k = max(1, k)
+
+    if n_clusters is None:
+        print("Running silhouette sweep to find optimal k...")
+        k = select_optimal_k(X, k_min=2, k_max=8)
+    else:
+        distinct_points = len(X.drop_duplicates())
+        k = min(n_clusters, len(clean_df), distinct_points)
+        k = max(1, k)
 
     kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
     clean_df[cluster_col] = kmeans.fit_predict(X)
@@ -314,7 +375,7 @@ def assign_candidates_to_centroids(candidates_df: pd.DataFrame, centroids_df: pd
     best_idx = sim.argmax(axis=1)
     best_score = sim.max(axis=1)
 
-    cand_clean["assigned_cluster_id"] = [int(cent_clean.iloc[i]["cluster_id"]) for i in best_idx]
+    cand_clean["assigned_cluster_id"] = [int(cent_clean.iloc[i]["cluster_id"] or 0) for i in best_idx]
     cand_clean["cluster_similarity"] = best_score
 
     return cand_clean
@@ -401,7 +462,7 @@ def score_candidates_by_weather_centroid(
     df = coerce_numeric_audio(df)
     clean = df.dropna(subset=AUDIO_FEATURE_COLS).copy()
 
-    centroid_vec = weather_audio_centroid[AUDIO_FEATURE_COLS].to_numpy(dtype=float).reshape(1, -1)
+    centroid_vec = weather_audio_centroid[AUDIO_FEATURE_COLS].values.reshape(1, -1) # type: ignore
     sims = cosine_similarity(clean[AUDIO_FEATURE_COLS].values, centroid_vec).flatten()
     clean["context_score"] = sims
 
@@ -453,9 +514,10 @@ if __name__ == "__main__":
     # step 2: cluster those tracks by audio features
     clustered_profile_df, centroids_df, _kmeans = cluster_tracks_by_audio(
         profile_df,
-        n_clusters=4,
+        n_clusters=None,  # auto-select via silhouette sweep # type: ignore
         cluster_col="audio_cluster"
     )
+    print(f"Optimal k={len(centroids_df)} clusters selected via silhouette score")
     print("Cluster counts:")
     print(clustered_profile_df["audio_cluster"].value_counts().sort_index())
 

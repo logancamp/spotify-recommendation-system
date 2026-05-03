@@ -435,6 +435,25 @@ def show_playlist():
     st.markdown(f'<p class="playlist-header">{pname}</p>', unsafe_allow_html=True)
     st.markdown(f'<p class="playlist-sub">{len(df)} tracks</p>', unsafe_allow_html=True)
 
+    # catalog coverage and filter strictness metrics
+    try:
+        total_catalog = read_df(f"""
+            SELECT COUNT(*) AS n FROM ranked_recommendations rr
+            JOIN users u ON u.user_id = rr.user_id
+            WHERE u.spotify_user_hash = '{user_hash}';
+        """).iloc[0]["n"]
+        total_filtered = len(all_data)  # after mood filter, before trim
+        coverage_pct = int(len(df) / total_catalog * 100) if total_catalog > 0 else 0
+        filter_pct = int(total_filtered / total_catalog * 100) if total_catalog > 0 else 100
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Songs in playlist", len(df))
+        c2.metric("Passed mood filter", f"{total_filtered} / {total_catalog}", help="How many songs from the full catalog passed your mood constraints")
+        c3.metric("Filter strictness", f"{100 - filter_pct}% filtered out", help="Higher = more selective mood filtering")
+    except Exception:
+        pass
+        st.session_state.selected_song = None
+
     if "selected_song" not in st.session_state:
         st.session_state.selected_song = None
 
@@ -526,24 +545,74 @@ def show_playlist():
     with col_pca:
         from sklearn.preprocessing import StandardScaler
         from sklearn.decomposition import PCA
+        from sklearn.cluster import KMeans
+
         pca_features = ["recommended_danceability","recommended_energy","recommended_valence",
                         "recommended_acousticness","recommended_instrumentalness",
                         "recommended_liveness","recommended_speechiness"]
-        scaled = StandardScaler().fit_transform(chart_df[pca_features].fillna(0))
-        coords = PCA(n_components=2).fit_transform(scaled)
+
+        pca_feature_map = {
+            "recommended_danceability": "danceability",
+            "recommended_energy": "energy",
+            "recommended_valence": "valence",
+            "recommended_acousticness": "acousticness",
+            "recommended_instrumentalness": "instrumentalness",
+            "recommended_liveness": "liveness",
+            "recommended_speechiness": "speechiness",
+        }
+
+        scaler = StandardScaler()
+        scaled = scaler.fit_transform(chart_df[pca_features].fillna(0))
+        pca = PCA(n_components=2)
+        coords = pca.fit_transform(scaled)
         chart_df["pc1"], chart_df["pc2"] = coords[:,0], coords[:,1]
+
         fig_pca = go.Figure(go.Scatter(
             x=chart_df["pc1"], y=chart_df["pc2"], mode="markers+text",
+            name="Songs",
             text=chart_df["recommended_track_name"], textposition="top center",
             textfont=dict(size=9, color="rgba(255,255,255,0.6)"),
             marker=dict(size=10, color='#1DB954', opacity=0.85),
             hovertemplate="<b>%{text}</b><br>%{customdata}<extra></extra>",
             customdata=chart_df["recommended_artist_names"]))
-        fig_pca.update_layout(title="Song Similarity Map (PCA)", height=400,
-                              margin=dict(l=20,r=20,t=40,b=20),
-                              paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='white'),
-                              xaxis=dict(title="PC1", gridcolor='rgba(150,150,150,0.15)', zeroline=False),
-                              yaxis=dict(title="PC2", gridcolor='rgba(150,150,150,0.15)', zeroline=False))
+
+        # load centroids from CSV and project into same PCA space
+        try:
+            import glob
+            centroid_files = glob.glob("data/*_audio_cluster_centroids_db.csv")
+            if centroid_files:
+                cent_df = pd.read_csv(centroid_files[0])
+                # map centroid column names to match pca_features
+                cent_renamed = cent_df.rename(columns={v: k for k, v in pca_feature_map.items()})
+                cent_cols = [c for c in pca_features if c in cent_renamed.columns]
+                if cent_cols and len(cent_cols) == len(pca_features):
+                    cent_scaled = scaler.transform(cent_renamed[pca_features].fillna(0))
+                    cent_coords = pca.transform(cent_scaled)
+                    centroid_labels = [f"Cluster {int(row['cluster_id'])}<br>energy={row['energy']:.2f} valence={row['valence']:.2f}"
+                                       for _, row in cent_df.iterrows()]
+                    fig_pca.add_trace(go.Scatter(
+                        x=cent_coords[:,0], y=cent_coords[:,1],
+                        mode="markers+text",
+                        name="Taste Centroids",
+                        text=[f"C{int(r['cluster_id'])}" for _, r in cent_df.iterrows()],
+                        textposition="bottom center",
+                        textfont=dict(size=11, color="#FF6B35"),
+                        marker=dict(size=18, color="#FF6B35", symbol="star",
+                                    line=dict(color="white", width=1.5)),
+                        hovertemplate="<b>%{customdata}</b><extra></extra>",
+                        customdata=centroid_labels,
+                    ))
+        except Exception:
+            pass
+
+        fig_pca.update_layout(
+            title="Song Similarity Map (PCA) — ⭐ = Taste Centroids",
+            height=400, margin=dict(l=20,r=20,t=40,b=20),
+            paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+            font=dict(color='white'),
+            legend=dict(orientation="h", y=-0.2),
+            xaxis=dict(title="PC1", gridcolor='rgba(150,150,150,0.15)', zeroline=False),
+            yaxis=dict(title="PC2", gridcolor='rgba(150,150,150,0.15)', zeroline=False))
         st.plotly_chart(fig_pca, use_container_width=True)
 
     st.divider()

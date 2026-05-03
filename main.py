@@ -246,51 +246,81 @@ def show_playlist():
             mood_clauses.append(f"{col} {flip_op} {relaxed:.4f}")
     mood_where = ("AND " + " AND ".join(mood_clauses)) if mood_clauses else ""
 
-    sql = f"""
-        SELECT
-            rr.spotify_track_id,
-            rr.name        AS recommended_track_name,
-            rr.primary_artist AS recommended_artist_names,
-            rr.final_score,
-            rr.cluster_similarity,
-            rr.context_score,
-            rr.rank_position,
-            af.danceability  AS recommended_danceability,
-            af.energy        AS recommended_energy,
-            af.valence       AS recommended_valence,
-            af.acousticness  AS recommended_acousticness,
-            af.instrumentalness AS recommended_instrumentalness,
-            af.liveness      AS recommended_liveness,
-            af.speechiness   AS recommended_speechiness,
-            af.tempo,
-            af.loudness,
-            t.popularity,
-            t.duration_ms,
-            t.explicit,
-            CASE WHEN ct.pipeline_run_id = (
-                SELECT MAX(id) FROM pipeline_runs
+    def build_sql(where_clause):
+        return f"""
+            SELECT
+                rr.spotify_track_id,
+                rr.name        AS recommended_track_name,
+                rr.primary_artist AS recommended_artist_names,
+                rr.final_score,
+                rr.cluster_similarity,
+                rr.context_score,
+                rr.rank_position,
+                af.danceability  AS recommended_danceability,
+                af.energy        AS recommended_energy,
+                af.valence       AS recommended_valence,
+                af.acousticness  AS recommended_acousticness,
+                af.instrumentalness AS recommended_instrumentalness,
+                af.liveness      AS recommended_liveness,
+                af.speechiness   AS recommended_speechiness,
+                af.tempo,
+                af.loudness,
+                t.popularity,
+                t.duration_ms,
+                t.explicit,
+                CASE WHEN ct.pipeline_run_id = (
+                    SELECT MAX(id) FROM pipeline_runs
+                    WHERE user_id = (SELECT user_id FROM users WHERE spotify_user_hash = '{user_hash}')
+                ) AND (
+                    SELECT COUNT(*) FROM pipeline_runs
+                    WHERE user_id = (SELECT user_id FROM users WHERE spotify_user_hash = '{user_hash}')
+                ) > 1
+                THEN true ELSE false END AS is_new
+            FROM ranked_recommendations rr
+            JOIN users u ON u.user_id = rr.user_id
+            JOIN audio_features af ON af.spotify_track_id = rr.spotify_track_id
+            JOIN tracks t ON t.spotify_track_id = rr.spotify_track_id
+            LEFT JOIN (
+                SELECT spotify_track_id, MIN(pulled_at) AS first_added, MAX(pipeline_run_id) AS pipeline_run_id
+                FROM catalog_tracks
                 WHERE user_id = (SELECT user_id FROM users WHERE spotify_user_hash = '{user_hash}')
-            ) AND (
-                SELECT COUNT(*) FROM pipeline_runs
-                WHERE user_id = (SELECT user_id FROM users WHERE spotify_user_hash = '{user_hash}')
-            ) > 1
-            THEN true ELSE false END AS is_new
-        FROM ranked_recommendations rr
-        JOIN users u ON u.user_id = rr.user_id
-        JOIN audio_features af ON af.spotify_track_id = rr.spotify_track_id
-        JOIN tracks t ON t.spotify_track_id = rr.spotify_track_id
-        LEFT JOIN (
-            SELECT spotify_track_id, MIN(pulled_at) AS first_added, MAX(pipeline_run_id) AS pipeline_run_id
-            FROM catalog_tracks
-            WHERE user_id = (SELECT user_id FROM users WHERE spotify_user_hash = '{user_hash}')
-            GROUP BY spotify_track_id
-        ) ct ON ct.spotify_track_id = rr.spotify_track_id
-        WHERE u.spotify_user_hash = '{user_hash}'
-        {mood_where}
-        ORDER BY rr.rank_position
-        LIMIT 500;
-    """
-    all_data = read_df(sql)
+                GROUP BY spotify_track_id
+            ) ct ON ct.spotify_track_id = rr.spotify_track_id
+            WHERE u.spotify_user_hash = '{user_hash}'
+            {where_clause}
+            ORDER BY rr.rank_position
+            LIMIT 500;
+        """
+
+    MIN_SONGS = 5
+    fallback_notice = None
+    all_data = read_df(build_sql(mood_where))
+
+    # progressive fallback: if too few results, relax thresholds in 3 steps then drop filters entirely
+    if len(all_data) < MIN_SONGS and mood_clauses:
+        for relax_factor in [0.20, 0.40, 0.60]:
+            relaxed_clauses = []
+            for feature, (col, op, thresh) in MOOD_SQL_COLS.items():
+                base_relax = survey_temp / 2.0 * 0.4
+                total_relax = base_relax + relax_factor
+                if feature in want_list:
+                    r = thresh * (1.0 - total_relax) if op == ">=" else thresh * (1.0 + total_relax)
+                    relaxed_clauses.append(f"{col} {op} {r:.4f}")
+                elif feature in dont_list:
+                    flip_op = "<" if op == ">=" else ">"
+                    r = thresh * (1.0 + total_relax) if op == ">=" else thresh * (1.0 - total_relax)
+                    relaxed_clauses.append(f"{col} {flip_op} {r:.4f}")
+            relaxed_where = "AND " + " AND ".join(relaxed_clauses)
+            all_data = read_df(build_sql(relaxed_where))
+            if len(all_data) >= MIN_SONGS:
+                pct = int(relax_factor * 100)
+                fallback_notice = f"⚠️ Not enough songs matched your exact filters — thresholds relaxed by {pct}% to find results."
+                break
+        else:
+            # all relaxation attempts failed — drop filters entirely
+            all_data = read_df(build_sql(""))
+            if not all_data.empty:
+                fallback_notice = "⚠️ No songs matched your mood filters — showing your best overall matches instead."
     if "cluster_similarity" not in all_data.columns:
         all_data["cluster_similarity"] = all_data["final_score"]
     if all_data.empty:
@@ -299,6 +329,9 @@ def show_playlist():
             st.session_state.page_state = "survey"
             st.rerun()
         return
+
+    if fallback_notice:
+        st.warning(fallback_notice)
 
     df = all_data.copy()
 
@@ -546,7 +579,7 @@ def show_analytics():
     st.markdown("## 📊 Analytics")
 
     # ── 0. Weather influence ──────────────────────────────────────────────────
-    with st.expander("🌤️ Weather influence — how today's weather shaped your recommendations", expanded=False):
+    with st.expander("🌤️ Weather influence — how today's weather shaped your recommendations", expanded=True):
         try:
             weather_df = read_df("SELECT temperature_c, relative_humidity, wind_speed_m_s, text_description, fetched_at "
                                  "FROM context_inputs ORDER BY fetched_at DESC LIMIT 1;")
@@ -586,7 +619,7 @@ def show_analytics():
             st.caption(f"Could not load weather analytics: {e}")
 
     # ── 1. Filter validation — uses exact playlist songs in playlist order ─────
-    with st.expander("🎯 Filter validation — does the playlist match your mood?", expanded=False):
+    with st.expander("🎯 Filter validation — does the playlist match your mood?", expanded=True):
         want_list = st.session_state.get("survey_want", [])
         dont_list = st.session_state.get("survey_dont_want", [])
         if not want_list and not dont_list:

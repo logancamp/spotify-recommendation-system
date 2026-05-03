@@ -546,7 +546,7 @@ def show_analytics():
     st.markdown("## 📊 Analytics")
 
     # ── 0. Weather influence ──────────────────────────────────────────────────
-    with st.expander("🌤️ Weather influence — how today's weather shaped your recommendations", expanded=True):
+    with st.expander("🌤️ Weather influence — how today's weather shaped your recommendations", expanded=False):
         try:
             weather_df = read_df("SELECT temperature_c, relative_humidity, wind_speed_m_s, text_description, fetched_at "
                                  "FROM context_inputs ORDER BY fetched_at DESC LIMIT 1;")
@@ -586,7 +586,7 @@ def show_analytics():
             st.caption(f"Could not load weather analytics: {e}")
 
     # ── 1. Filter validation — uses exact playlist songs in playlist order ─────
-    with st.expander("🎯 Filter validation — does the playlist match your mood?", expanded=True):
+    with st.expander("🎯 Filter validation — does the playlist match your mood?", expanded=False):
         want_list = st.session_state.get("survey_want", [])
         dont_list = st.session_state.get("survey_dont_want", [])
         if not want_list and not dont_list:

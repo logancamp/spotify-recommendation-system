@@ -11,6 +11,7 @@ The airflow DAG handles the scheduled nightly runs separately using the refresh 
 import os
 import subprocess
 import sys
+import requests as _req, time as _time
 
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 PIPELINE_DIR = os.path.join(REPO_ROOT, "pipeline", "spotify_pipeline")
@@ -123,6 +124,39 @@ def run_for_user(access_token: str, user_hash: str, skip_candidates: bool = Fals
             REPO_ROOT,
         )
     )
+
+
+    # Airflow trigger (uncomment to use instead of direct subprocess)
+    # Requires AIRFLOW_BASE_URL, AIRFLOW_USERNAME, AIRFLOW_PASSWORD in .env
+    # Also needs the 'spotify_pipeline' DAG deployed to the Airflow instance.
+    
+    # ─────────────────────────────────────────────────────────────────────────────
+    # _base = os.getenv("AIRFLOW_BASE_URL", "http://localhost:8080")
+    # _resp = _req.post(
+    #     f"{_base}/api/v1/dags/spotify_pipeline/dagRuns",
+    #     auth=(os.getenv("AIRFLOW_USERNAME") or "", os.getenv("AIRFLOW_PASSWORD") or ""),
+    #     json={"conf": {"user_hash": user_hash, 
+    #                    "access_token": access_token,
+    #                    "city": city, 
+    #                    "pipeline_run_id": run_id}}, timeout=10,)
+    
+    # _resp.raise_for_status()
+    # _run_id = _resp.json()["dag_run_id"]
+    
+    # while True:
+    #     _status = _req.get(f"{_base}/api/v1/dags/spotify_pipeline/dagRuns/{_run_id}",
+    #                             auth=(os.getenv("AIRFLOW_USERNAME") or "", os.getenv("AIRFLOW_PASSWORD") or ""), timeout=10,).json()
+        
+    #     if _status["state"] in ("success", "failed"): break
+    #     _time.sleep(3)
+    
+    # return [{"step": "Airflow DAG", 
+    #          "success": _status["state"] == "success",
+    #          "stdout": "", 
+    #          "stderr": "", 
+    #          "returncode": 0}]
+    # ─────────────────────────────────────────────────────────────────────────────
+
 
     results = []
     for label, cmd, cwd in steps:

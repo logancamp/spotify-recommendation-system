@@ -229,7 +229,11 @@ def save_playlist_to_spotify(df, playlist_name: str = "My Recommended Playlist")
     playlist = resp.json()
     playlist_id = playlist["id"]
     playlist_url = playlist.get("external_urls", {}).get("spotify", "")
-    uris = [f"spotify:track:{tid}" for tid in df["spotify_track_id"].tolist()]
+    uris = [
+        f"spotify:track:{tid}"
+        for tid in df["spotify_track_id"].tolist()
+        if not tid.startswith("INJ")
+    ]
     
     for i in range(0, len(uris), 100):
         r = requests.post(f"https://api.spotify.com/v1/playlists/{playlist_id}/items", headers=headers,

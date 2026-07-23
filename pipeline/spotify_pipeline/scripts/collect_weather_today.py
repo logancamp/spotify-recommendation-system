@@ -1,10 +1,16 @@
 import requests
 import pandas as pd
 import os
+import sys
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, text
 
-load_dotenv()
+# Load .env from repo root (two levels up from this script)
+load_dotenv(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".env"))
+
+# Allow importing db_utils from repo root
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+from sqlalchemy import text
+from db_utils import get_engine
 
 NWS_BASE = "https://api.weather.gov"
 
@@ -15,15 +21,6 @@ HEADERS = {
 
 OUTPUT_FILE = "data/today_weather.csv"
 
-
-def get_db_engine():
-    url = (
-        f"postgresql+psycopg2://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}"
-        f"@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}"
-    )
-    return create_engine(url, pool_pre_ping=True)
-
-
 # This is the API call function with error handling and JSON parsing
 def safe_get_json(url, headers=None, params=None, timeout=20):
     response = requests.get(url, headers=headers, params=params, timeout=timeout)
@@ -31,31 +28,8 @@ def safe_get_json(url, headers=None, params=None, timeout=20):
     return response.json()
 
 
-def geocode_city(city: str):
-    """
-    Turn a city name into lat/lon using the Open-Meteo geocoding API.
-    Free, no API key needed.
-    """
-    data = safe_get_json(
-        "https://geocoding-api.open-meteo.com/v1/search",
-        params={"name": city, "count": 1, "language": "en", "format": "json"},
-        timeout=10,
-    )
-    results = data.get("results")
-    if not results:
-        raise ValueError(f"Could not geocode city: '{city}'. Try a more specific name like 'Cleveland, OH'.")
-    first = results[0]
-    return float(first["latitude"]), float(first["longitude"])
-
-
 def get_location():
-    # if a city was provided (e.g. from the streamlit survey), geocode it instead of using IP
-    city = os.getenv("WEATHER_CITY", "").strip()
-    if city:
-        print(f"Using user-provided city for weather: {city}")
-        return geocode_city(city)
-
-    # fall back to IP geolocation if no city was given
+    # try multiple ip providers in case of failure or rate limits
     providers = [
         "https://ipapi.co/json/",
         "http://ip-api.com/json/",
@@ -67,7 +41,7 @@ def get_location():
     # try each provider until we get a valid response with lat/lon
     for url in providers:
         try:
-            data = safe_get_json(url, timeout=10)
+            data = safe_get_json(url, timeout=10) 
             last_response = data
 
             lat = data.get("latitude") or data.get("lat")
@@ -152,38 +126,37 @@ if __name__ == "__main__":
     station = get_station(lat, lon)
     weather = get_current_weather(station)
 
-    # save location too just in case
     weather["latitude"] = lat
     weather["longitude"] = lon
 
-    # save to CSV
+    # 1) Save to CSV (repo root data/ folder)
+    repo_root = os.path.join(os.path.dirname(__file__), "..", "..", "..")
+    output_file = os.path.join(repo_root, "data", "today_weather.csv")
     df = pd.DataFrame([weather])
-    df.to_csv(OUTPUT_FILE, index=False)
-    print(f"Saved today's weather to {OUTPUT_FILE}")
+    df.to_csv(output_file, index=False)
+    print(f"Saved today's weather to {output_file}")
 
-    # write to context_inputs table so cluster.py can read it
-    try:
-        engine = get_db_engine()
-        with engine.begin() as conn:
-            conn.execute(
-                text("""
-                    INSERT INTO context_inputs
-                        (temperature_c, relative_humidity, wind_speed_m_s, text_description,
-                         latitude, longitude, observation_time, fetched_at)
-                    VALUES
-                        (:temperature_c, :relative_humidity, :wind_speed_m_s, :text_description,
-                         :latitude, :longitude, :observation_time, NOW())
-                """),
-                {
-                    "temperature_c":    weather.get("temperature_c"),
-                    "relative_humidity": weather.get("relative_humidity"),
-                    "wind_speed_m_s":   weather.get("wind_speed_m_s"),
-                    "text_description": weather.get("text_description"),
-                    "latitude":         weather.get("latitude"),
-                    "longitude":        weather.get("longitude"),
-                    "observation_time": weather.get("observation_time"),
-                },
-            )
-        print(f"Wrote weather to context_inputs: {weather.get('text_description')}, {weather.get('temperature_c')}°C")
-    except Exception as e:
-        print(f"WARNING: could not write to context_inputs: {e}")
+    # 2) Write to context_inputs table in Postgres
+    engine = get_engine()
+    with engine.begin() as conn:
+        conn.execute(
+            text("""
+                INSERT INTO context_inputs (
+                    temperature_c, relative_humidity, wind_speed_m_s,
+                    text_description, latitude, longitude, observation_time
+                ) VALUES (
+                    :temperature_c, :relative_humidity, :wind_speed_m_s,
+                    :text_description, :latitude, :longitude, :observation_time
+                )
+            """),
+            {
+                "temperature_c": weather.get("temperature_c"),
+                "relative_humidity": weather.get("relative_humidity"),
+                "wind_speed_m_s": weather.get("wind_speed_m_s"),
+                "text_description": weather.get("text_description"),
+                "latitude": weather.get("latitude"),
+                "longitude": weather.get("longitude"),
+                "observation_time": weather.get("observation_time"),
+            }
+        )
+    print("✅ Wrote weather to context_inputs table in Postgres")

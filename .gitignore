@@ -1,1 +1,16 @@
+.env
+.env*
+__pycache__/
+*.pyc
+data/
+logs/
 .DS_Store
+.cache
+*.cache
+*.pem
+*.key
+*.token
+pipeline/spotify_pipeline/data/
+venv/
+.venv/
+.streamlit/

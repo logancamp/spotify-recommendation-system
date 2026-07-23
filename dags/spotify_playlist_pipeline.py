@@ -1,0 +1,114 @@
+from airflow import DAG
+from airflow.operators.bash import BashOperator
+from datetime import datetime
+
+#REPO_ROOT = "/D/tdo18/OneDrive/CSDS417/spotify-recommendation-system"
+#PIPELINE_DIR = f"{REPO_ROOT}/pipeline/spotify_pipeline"
+#ANALYTICS_DIR = REPO_ROOT
+
+REPO_ROOT = "/D/tdo18/Documents/spotify-recommendation-system"
+PIPELINE_DIR = f"{REPO_ROOT}/pipeline/spotify_pipeline"
+ANALYTICS_DIR = REPO_ROOT
+
+with DAG(
+    dag_id="spotify_playlist_pipeline",
+    start_date=datetime(2024, 2, 1),
+    schedule="0 8,20 * * *",  # runs at 8am and 8pm every day
+    catchup=False,
+    tags=["csds417", "spotify", "reccobeats", "data-engineering"],
+) as dag:
+
+    # ---------------------------------
+    # Current implemented pipeline tasks
+    # ---------------------------------
+    extract_and_store_top_tracks = BashOperator(
+        task_id="extract_and_store_top_tracks",
+        bash_command=f"cd {PIPELINE_DIR} && python scripts/ingest_spotify_top_tracks.py",
+    )
+
+    enrich_audio_features = BashOperator(
+        task_id="enrich_audio_features",
+        bash_command=f"cd {PIPELINE_DIR} && python scripts/enrich_audio_features_from_reccobeats.py",
+    )
+
+    upload_missing_report = BashOperator(
+        task_id="upload_missing_audio_features_report",
+        bash_command=f"cd {PIPELINE_DIR} && python scripts/upload_missing_audio_features_report.py",
+    )
+
+    build_candidate_pool = BashOperator(
+        task_id="build_candidate_pool",
+        bash_command=f"cd {PIPELINE_DIR} && python scripts/build_catalog_spotify_search.py",
+    )
+
+    upload_candidate_search_raw_to_s3 = BashOperator(
+        task_id="upload_candidate_search_raw_to_s3",
+        bash_command=f"cd {PIPELINE_DIR} && python scripts/upload_candidate_search_raw_to_s3.py",
+    )
+
+    enrich_candidate_audio_features = BashOperator(
+        task_id="enrich_candidate_audio_features",
+        bash_command=f"cd {PIPELINE_DIR} && python scripts/enrich_catalog_audio_features.py",
+    )
+
+    run_audio_clustering = BashOperator(
+        task_id="run_audio_clustering",
+        bash_command=f"cd {ANALYTICS_DIR} && python cluster.py",
+    )
+
+    upload_ranked_recommendations_to_s3 = BashOperator(
+        task_id="upload_ranked_recommendations_to_s3",
+        bash_command=f"cd {ANALYTICS_DIR} && python upload_ranked_csv_to_s3.py",
+    )
+
+    # ---------------------------------
+    # Future placeholder tasks
+    # ---------------------------------
+    extract_recently_played = BashOperator(
+        task_id="extract_recently_played",
+        bash_command=(
+            "echo 'TODO: call Spotify /me/player/recently-played "
+            "to pull recently played tracks with played_at timestamps'"
+        ),
+    )
+
+    fetch_weather = BashOperator(
+        task_id="fetch_weather_from_recently_played",
+        bash_command=f"cd {ANALYTICS_DIR} && python data-collect/collect_weather_today.py",
+    )
+
+    join_recently_played_with_weather = BashOperator(
+        task_id="join_recently_played_with_weather",
+        bash_command=(
+            "echo 'TODO: join recently played Spotify events with weather data by timestamp'"
+        ),
+    )
+
+    prepare_context_inputs = BashOperator(
+        task_id="prepare_context_inputs",
+        bash_command=(
+            "echo 'TODO: prepare context inputs from recently played + weather before clustering'"
+        ),
+    )
+
+    # ---------------------------------
+    # Dependencies
+    # ---------------------------------
+
+    # Profile branch
+    extract_and_store_top_tracks >> enrich_audio_features
+    enrich_audio_features >> upload_missing_report
+
+    # Candidate pool branch
+    extract_and_store_top_tracks >> build_candidate_pool
+    build_candidate_pool >> upload_candidate_search_raw_to_s3
+    build_candidate_pool >> enrich_candidate_audio_features
+
+    # Context branch
+    extract_recently_played >> fetch_weather
+    fetch_weather >> join_recently_played_with_weather
+    join_recently_played_with_weather >> prepare_context_inputs
+
+    # Recommendation engine
+    [enrich_audio_features, enrich_candidate_audio_features, prepare_context_inputs] >> run_audio_clustering
+    run_audio_clustering >> upload_ranked_recommendations_to_s3
